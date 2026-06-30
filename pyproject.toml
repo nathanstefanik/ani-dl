@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ani-dl"
+version = "0.1.0"
+description = "A minimal anime downloader with the ani-cli search UX and no playback."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "ani-dl contributors" }]
+keywords = ["anime", "downloader", "allanime", "cli"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Environment :: Console",
+    "Topic :: Multimedia :: Video",
+]
+dependencies = [
+    "requests>=2.28",
+    "cryptography>=41.0",
+    "yt-dlp>=2024.1.0",
+]
+
+[project.scripts]
+ani-dl = "ani_dl.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/pystardust/ani-cli"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ani_dl"]
