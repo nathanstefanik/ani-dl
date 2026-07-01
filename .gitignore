@@ -1,15 +1,10 @@
-# Python
-__pycache__/
-*.py[cod]
-*.egg-info/
-build/
-dist/
-
-# Virtualenvs
-.venv/
-venv/
+# Rust
+/target
+**/*.rs.bk
+*.pdb
 
 # ani-dl output
 downloads/
 *.mp4
 *.mkv
+*.ts

@@ -1,0 +1,268 @@
+//! ani-dl — a zero-runtime-dependency Rust anime downloader. No playback, ever.
+
+mod api;
+mod cli;
+mod config;
+mod constants;
+mod hls;
+mod providers;
+mod sync;
+mod tui;
+
+use std::path::PathBuf;
+
+use anyhow::Result;
+use clap::Parser;
+use regex::Regex;
+
+use api::{AllAnimeClient, ShowResult, TranslationType};
+use cli::{Cli, Command};
+use config::Config;
+use hls::HlsDownloader;
+use providers::{resolve_all, select_quality};
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let cli = Cli::parse();
+    let mut cfg = Config::load().unwrap_or_default();
+
+    match &cli.command {
+        Some(Command::Sync { daemon }) => {
+            if *daemon {
+                sync::run_daemon(cfg).await
+            } else {
+                sync::run_once(&mut cfg, true).await
+            }
+        }
+        Some(Command::Config) => {
+            let path = config::config_path()?;
+            println!("Config path: {}", path.display());
+            println!("---\n{}", toml::to_string_pretty(&cfg)?);
+            Ok(())
+        }
+        Some(Command::Hls {
+            url,
+            out,
+            concurrency,
+            quality,
+            referer,
+        }) => {
+            let client = AllAnimeClient::new()?.client;
+            let dl = HlsDownloader::new(client, *concurrency, referer.clone(), 3);
+            let path = dl.download(url, std::path::Path::new(out), quality).await?;
+            println!("Downloaded: {}", path.display());
+            Ok(())
+        }
+        None => run_download(&cli, &cfg).await,
+    }
+}
+
+async fn run_download(cli: &Cli, cfg: &Config) -> Result<()> {
+    let mode = if cli.dubbed {
+        TranslationType::Dub
+    } else {
+        TranslationType::Sub
+    };
+    let concurrency = cli.concurrency.unwrap_or(cfg.download.concurrency);
+    let quality = if cli.quality.is_empty() {
+        cfg.download.quality.clone()
+    } else {
+        cli.quality.clone()
+    };
+    let out_dir = PathBuf::from(
+        cli.download_dir
+            .clone()
+            .unwrap_or_else(|| cfg.download.directory.clone()),
+    );
+
+    let api = AllAnimeClient::new()?;
+
+    // Determine query.
+    let query = match &cli.query {
+        Some(q) => q.clone(),
+        None => {
+            if cli.no_tui {
+                anyhow::bail!("--no-tui requires a QUERY argument");
+            }
+            prompt("Search anime: ")?
+        }
+    };
+    if query.trim().is_empty() {
+        anyhow::bail!("empty query");
+    }
+
+    eprintln!("Searching '{}' ({})...", query, mode.as_str());
+    let results = api.search(&query, mode).await?;
+    if results.is_empty() {
+        anyhow::bail!("no results found");
+    }
+
+    // Select show.
+    let show = pick_show(results, cli)?;
+    let Some(show) = show else {
+        return Ok(());
+    };
+    eprintln!("Selected: {} ({} eps)", show.name, show.episodes);
+
+    // Episode list.
+    let available = api.episode_list(&show.id, mode).await?;
+    if available.is_empty() {
+        anyhow::bail!("no episodes available for this translation type");
+    }
+
+    // Select episodes.
+    let episodes = pick_episodes(&available, cli)?;
+    if episodes.is_empty() {
+        eprintln!("No episodes selected.");
+        return Ok(());
+    }
+
+    let mut failures = 0;
+    for ep in &episodes {
+        eprintln!("\n=== Episode {ep} ===");
+        let sources = api.episode_sources(&show.id, ep, mode).await?;
+        let streams = resolve_all(&api.client, &sources).await;
+
+        if cli.list_providers {
+            if streams.is_empty() {
+                eprintln!("  (no streams resolved)");
+            }
+            let mut ordered = streams.clone();
+            ordered.sort_by(|a, b| b.height.cmp(&a.height));
+            for s in &ordered {
+                let h = if s.height > 0 {
+                    format!("{}p", s.height)
+                } else {
+                    "????".to_string()
+                };
+                println!("  [{:>10}] {:>5}  {}", s.provider, h, s.url);
+            }
+            continue;
+        }
+
+        let Some(chosen) = select_quality(&streams, &quality) else {
+            eprintln!("  ! no stream found for episode {ep}");
+            failures += 1;
+            continue;
+        };
+        let h = if chosen.height > 0 {
+            format!("{}p", chosen.height)
+        } else {
+            "unknown".to_string()
+        };
+        eprintln!("  source: {} ({})", chosen.provider, h);
+
+        std::fs::create_dir_all(&out_dir)?;
+        let filename = build_filename(&show.name, cli.season, ep);
+        let out_path = out_dir.join(format!("{filename}.mp4"));
+
+        let dl = HlsDownloader::new(
+            api.client.clone(),
+            concurrency,
+            chosen.referer.clone(),
+            cfg.download.retries,
+        );
+        match dl.download(&chosen.url, &out_path, &quality).await {
+            Ok(path) => println!("Downloaded: {}", path.display()),
+            Err(e) => {
+                eprintln!("  ! download failed for episode {ep}: {e}");
+                failures += 1;
+            }
+        }
+    }
+
+    if failures > 0 {
+        anyhow::bail!("{failures} episode(s) failed");
+    }
+    Ok(())
+}
+
+fn pick_show(results: Vec<ShowResult>, cli: &Cli) -> Result<Option<ShowResult>> {
+    if let Some(n) = cli.number {
+        if n >= 1 && n <= results.len() {
+            return Ok(Some(results[n - 1].clone()));
+        }
+        anyhow::bail!("--number {n} out of range (1-{})", results.len());
+    }
+    if cli.no_tui {
+        for (i, s) in results.iter().enumerate() {
+            println!("{}\t{} ({} episodes)", i + 1, s.name, s.episodes);
+        }
+        anyhow::bail!("--no-tui: re-run with -n <N> to pick a result");
+    }
+    tui::select_show(results)
+}
+
+fn pick_episodes(available: &[String], cli: &Cli) -> Result<Vec<String>> {
+    if let Some(arg) = &cli.episodes {
+        return Ok(parse_episode_arg(arg, available));
+    }
+    if cli.no_tui {
+        anyhow::bail!("--no-tui requires -e <RANGE> to pick episodes");
+    }
+    let chosen = tui::select_episodes(available.to_vec())?;
+    let mut chosen = chosen;
+    chosen.sort_by(|a, b| {
+        let fa: f64 = a.parse().unwrap_or(0.0);
+        let fb: f64 = b.parse().unwrap_or(0.0);
+        fa.partial_cmp(&fb).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    Ok(chosen)
+}
+
+/// Expand "1", "1-12", "1 2 5", "1,3,5" against the available episode list.
+fn parse_episode_arg(arg: &str, available: &[String]) -> Vec<String> {
+    let avail: std::collections::HashSet<&str> = available.iter().map(|s| s.as_str()).collect();
+    let mut picked: Vec<String> = Vec::new();
+    for token in arg.split(|c: char| c == ',' || c.is_whitespace()) {
+        let token = token.trim();
+        if token.is_empty() {
+            continue;
+        }
+        if let Some((lo, hi)) = token.split_once('-') {
+            if let (Ok(lo), Ok(hi)) = (lo.parse::<u32>(), hi.parse::<u32>()) {
+                for n in lo..=hi {
+                    picked.push(n.to_string());
+                }
+                continue;
+            }
+        }
+        picked.push(token.to_string());
+    }
+    let mut result = Vec::new();
+    for ep in picked {
+        if avail.contains(ep.as_str()) {
+            if !result.contains(&ep) {
+                result.push(ep);
+            }
+        } else {
+            eprintln!("  ! episode {ep} not available, skipping");
+        }
+    }
+    result
+}
+
+/// "Tongari.Boushi.no.Atelier.S01E13" (extension added by the downloader).
+fn build_filename(name: &str, season: u32, episode: &str) -> String {
+    let unsafe_re = Regex::new(r"[^\w\s-]").unwrap();
+    let ws_re = Regex::new(r"[\s_]+").unwrap();
+    let cleaned = unsafe_re.replace_all(name, "");
+    let dotted = ws_re.replace_all(cleaned.trim(), ".");
+    let dotted = dotted.trim_matches('.');
+    let title = if dotted.is_empty() { "anime" } else { dotted };
+
+    let ep_tag = match episode.parse::<f64>() {
+        Ok(f) if f.fract() == 0.0 => format!("E{:02}", f as u64),
+        _ => format!("E{episode}"),
+    };
+    format!("{title}.S{season:02}{ep_tag}")
+}
+
+fn prompt(msg: &str) -> Result<String> {
+    use std::io::{self, Write};
+    print!("{msg}");
+    io::stdout().flush()?;
+    let mut line = String::new();
+    io::stdin().read_line(&mut line)?;
+    Ok(line.trim().to_string())
+}
