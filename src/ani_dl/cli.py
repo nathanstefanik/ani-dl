@@ -149,8 +149,8 @@ def build_parser() -> argparse.ArgumentParser:
         description="Download anime via the AllAnime API (no playback).",
     )
     p.add_argument("query", nargs="?", help="search term")
-    p.add_argument("-d", "--download-dir", default="./downloads",
-                   help="directory to save files (default: ./downloads)")
+    p.add_argument("-d", "--download-dir", default=".",
+                   help="directory to save files (default: current directory)")
     p.add_argument("-q", "--quality", default="best",
                    help="best, worst, or e.g. 1080/720/480 (default: best)")
     p.add_argument("-e", "--episodes",

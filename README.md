@@ -40,7 +40,7 @@ pip install -e .
 ```
 ani-dl [OPTIONS] [QUERY]
 
-  -d, --download-dir PATH   Directory to save files (default: ./downloads)
+  -d, --download-dir PATH   Directory to save files (default: current directory)
   -q, --quality QUALITY     best, worst, or e.g. 1080 / 720 / 480 (default: best)
   -e, --episodes RANGE      "1", "1-12", "1 2 5" (skips fzf selection)
   -D, --dubbed              Use the dubbed version (default: subbed)
@@ -65,8 +65,8 @@ ani-dl -D "one piece"
 ani-dl "attack on titan" -n 1 -e 1 --list-providers
 ```
 
-Episodes are saved as `{sanitized_title}_ep{episode}.mp4` in the download
-directory.
+Episodes are saved as `{Dotted.Title}.S{NN}E{NN}.mp4` in the download
+directory (the current directory unless `-d` is given).
 
 ## Notes on AllAnime key rotation
 
