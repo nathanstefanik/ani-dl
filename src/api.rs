@@ -70,6 +70,14 @@ impl AllAnimeClient {
         query: &str,
         mode: TranslationType,
     ) -> Result<Vec<ShowResult>> {
+        // AllAnime's search index chokes on apostrophes (even exact titles like
+        // "Hell's Paradise" return nothing), but treats them as token breaks in
+        // its own data — so map them to spaces and collapse the whitespace.
+        let query = query
+            .replace(['\'', '\u{2018}', '\u{2019}', '`'], " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
         let variables = json!({
             "search": { "allowAdult": false, "allowUnknown": false, "query": query },
             "limit": 40,

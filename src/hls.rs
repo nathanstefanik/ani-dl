@@ -52,6 +52,20 @@ impl HlsDownloader {
             .error_for_status()?;
         let total = resp.content_length().unwrap_or(0);
         let pb = progress_bar(total, "downloading");
+        if total > 0 {
+            pb.set_style(
+                ProgressStyle::with_template(
+                    "  {msg} [{bar:30}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})",
+                )
+                .unwrap()
+                .progress_chars("=> "),
+            );
+        } else {
+            pb.set_style(
+                ProgressStyle::with_template("  {msg} {spinner} {bytes} ({bytes_per_sec})")
+                    .unwrap(),
+            );
+        }
 
         let mut file = tokio::fs::File::create(out_path).await?;
         let mut stream = resp.bytes_stream();
