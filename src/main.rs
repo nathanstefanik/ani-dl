@@ -47,7 +47,7 @@ async fn main() -> Result<()> {
             quality,
             referer,
         }) => {
-            let client = AllAnimeClient::new()?.client;
+            let client = api::download_client()?;
             let dl = HlsDownloader::new(client, *concurrency, referer.clone(), 3);
             let path = dl.download(url, std::path::Path::new(out), quality).await?;
             println!("Downloaded: {}", path.display());
@@ -117,11 +117,16 @@ async fn run_download(cli: &Cli, cfg: &Config) -> Result<()> {
         return Ok(());
     }
 
+    let dl_client = api::download_client()?;
+
     let mut failures = 0;
     for ep in &episodes {
         eprintln!("\n=== Episode {ep} ===");
         let sources = api.episode_sources(&show.id, ep, mode).await?;
+        let names: Vec<&str> = sources.iter().map(|s| s.source_name.as_str()).collect();
+        eprintln!("  providers: {}", if names.is_empty() { "(none)".to_string() } else { names.join(", ") });
         let streams = resolve_all(&api.client, &sources).await;
+        eprintln!("  resolved {} stream(s): {}", streams.len(), summarize_streams(&streams));
 
         if cli.list_providers {
             if streams.is_empty() {
@@ -151,21 +156,36 @@ async fn run_download(cli: &Cli, cfg: &Config) -> Result<()> {
             "unknown".to_string()
         };
         eprintln!("  source: {} ({})", chosen.provider, h);
+        eprintln!("  url: {}", chosen.url);
 
         std::fs::create_dir_all(&out_dir)?;
         let filename = build_filename(&show.name, cli.season, ep);
         let out_path = out_dir.join(format!("{filename}.mp4"));
+        eprintln!("  saving to: {}", out_path.display());
 
         let dl = HlsDownloader::new(
-            api.client.clone(),
+            dl_client.clone(),
             concurrency,
             chosen.referer.clone(),
             cfg.download.retries,
         );
+        let started = std::time::Instant::now();
         match dl.download(&chosen.url, &out_path, &quality).await {
-            Ok(path) => println!("Downloaded: {}", path.display()),
+            Ok(path) => {
+                let secs = started.elapsed().as_secs_f64();
+                let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                println!(
+                    "Downloaded: {} ({} in {:.0}s, {}/s avg)",
+                    path.display(),
+                    indicatif::HumanBytes(size),
+                    secs,
+                    indicatif::HumanBytes((size as f64 / secs.max(0.001)) as u64),
+                );
+            }
             Err(e) => {
-                eprintln!("  ! download failed for episode {ep}: {e}");
+                // {:#} prints the whole anyhow chain — the top-level reqwest
+                // message alone ("error decoding response body") hides the cause.
+                eprintln!("  ! download failed for episode {ep}: {e:#}");
                 failures += 1;
             }
         }
@@ -175,6 +195,25 @@ async fn run_download(cli: &Cli, cfg: &Config) -> Result<()> {
         anyhow::bail!("{failures} episode(s) failed");
     }
     Ok(())
+}
+
+/// "yt (1080p), hls (720p), mp4upload (???)" — one entry per resolved stream.
+fn summarize_streams(streams: &[providers::Stream]) -> String {
+    if streams.is_empty() {
+        return "(none)".to_string();
+    }
+    streams
+        .iter()
+        .map(|s| {
+            let h = if s.height > 0 {
+                format!("{}p", s.height)
+            } else {
+                "???".to_string()
+            };
+            format!("{} ({h})", s.provider)
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn pick_show(results: Vec<ShowResult>, cli: &Cli) -> Result<Option<ShowResult>> {

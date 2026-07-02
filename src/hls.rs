@@ -42,6 +42,7 @@ impl HlsDownloader {
     }
 
     async fn download_direct(&self, url: &str, out_path: &Path) -> Result<PathBuf> {
+        eprintln!("  direct download (referer: {})", self.referer);
         let resp = self
             .client
             .get(url)
@@ -51,6 +52,15 @@ impl HlsDownloader {
             .context("direct download request failed")?
             .error_for_status()?;
         let total = resp.content_length().unwrap_or(0);
+        eprintln!(
+            "  HTTP {} — size: {}",
+            resp.status(),
+            if total > 0 {
+                indicatif::HumanBytes(total).to_string()
+            } else {
+                "unknown".to_string()
+            }
+        );
         let pb = progress_bar(total, "downloading");
         if total > 0 {
             pb.set_style(
@@ -67,23 +77,54 @@ impl HlsDownloader {
             );
         }
 
-        let mut file = tokio::fs::File::create(out_path).await?;
+        // Stream into a .part file and rename on success, so an interrupted
+        // download never leaves behind what looks like a finished .mp4.
+        let part_path = out_path.with_extension("mp4.part");
+        let mut file = tokio::fs::File::create(&part_path).await?;
         let mut stream = resp.bytes_stream();
         let mut downloaded = 0u64;
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
+            let chunk = match chunk {
+                Ok(c) => c,
+                Err(e) => {
+                    pb.finish_and_clear();
+                    let _ = tokio::fs::remove_file(&part_path).await;
+                    return Err(anyhow::Error::new(e).context(format!(
+                        "body read failed after {} of {}",
+                        indicatif::HumanBytes(downloaded),
+                        if total > 0 {
+                            indicatif::HumanBytes(total).to_string()
+                        } else {
+                            "unknown".to_string()
+                        }
+                    )));
+                }
+            };
             file.write_all(&chunk).await?;
             downloaded += chunk.len() as u64;
             pb.set_position(downloaded);
         }
         file.flush().await?;
         pb.finish_and_clear();
+        if total > 0 && downloaded < total {
+            let _ = tokio::fs::remove_file(&part_path).await;
+            return Err(anyhow!(
+                "truncated download: got {} of {}",
+                indicatif::HumanBytes(downloaded),
+                indicatif::HumanBytes(total)
+            ));
+        }
+        tokio::fs::rename(&part_path, out_path).await?;
         Ok(out_path.to_path_buf())
     }
 
     async fn download_hls(&self, url: &str, out_path: &Path, quality: &str) -> Result<PathBuf> {
         // 1. Fetch playlist; if it's a master, pick a variant.
+        eprintln!("  HLS download (referer: {})", self.referer);
         let media_url = self.resolve_media_playlist(url, quality).await?;
+        if media_url != url {
+            eprintln!("  variant playlist: {media_url}");
+        }
 
         // 2. Fetch the media playlist and collect segments.
         let text = self
@@ -115,6 +156,14 @@ impl HlsDownloader {
         tokio::fs::create_dir_all(&tmp_dir).await?;
 
         let n = media.segments.len();
+        let dur: f32 = media.segments.iter().map(|s| s.duration).sum();
+        eprintln!(
+            "  {} segments (~{:.0} min video), {} AES key(s), {} parallel",
+            n,
+            dur / 60.0,
+            key_cache.len(),
+            self.concurrency
+        );
         let pb = progress_bar(n as u64, "segments");
         pb.set_style(
             ProgressStyle::with_template("  {msg} [{bar:30}] {pos}/{len} ({eta})")
@@ -147,7 +196,9 @@ impl HlsDownloader {
             let tmp_dir = tmp_dir.clone();
             let pb = pb.clone();
             async move {
-                let bytes = download_segment(&client, &job.url, &referer, retries).await?;
+                let bytes = download_segment(&client, &job.url, &referer, retries)
+                    .await
+                    .with_context(|| format!("segment {} ({})", job.index, job.url))?;
                 let bytes = maybe_decrypt(bytes, &job, key_cache)?;
                 let seg_path = tmp_dir.join(format!("seg_{:05}.ts", job.index));
                 tokio::fs::write(&seg_path, &bytes).await?;
@@ -163,19 +214,23 @@ impl HlsDownloader {
             if let Err(e) = r {
                 pb.finish_and_clear();
                 let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
-                return Err(anyhow!("segment download failed: {e}"));
+                return Err(anyhow!("segment download failed: {e:#}"));
             }
         }
         pb.finish_and_clear();
 
-        // 5. Concatenate segments in order into the final file.
-        let mut out = tokio::fs::File::create(out_path).await?;
+        // 5. Concatenate segments in order into a .part file, then rename, so
+        // a crash mid-concat never leaves a half-written .mp4.
+        eprintln!("  concatenating {n} segments...");
+        let part_path = out_path.with_extension("mp4.part");
+        let mut out = tokio::fs::File::create(&part_path).await?;
         for i in 0..n {
             let seg_path = tmp_dir.join(format!("seg_{:05}.ts", i));
             let data = tokio::fs::read(&seg_path).await?;
             out.write_all(&data).await?;
         }
         out.flush().await?;
+        tokio::fs::rename(&part_path, out_path).await?;
 
         // 6. Clean up temp segments.
         let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
@@ -316,6 +371,12 @@ async fn download_segment(
             Err(e) => last_err = Some(anyhow!(e)),
         }
         if attempt < retries {
+            eprintln!(
+                "  ! retry {}/{} for {url}: {:#}",
+                attempt + 1,
+                retries,
+                last_err.as_ref().unwrap()
+            );
             tokio::time::sleep(std::time::Duration::from_millis(300 * (attempt as u64 + 1))).await;
         }
     }

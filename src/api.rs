@@ -51,14 +51,33 @@ pub struct AllAnimeClient {
     pub client: reqwest::Client,
 }
 
+fn default_headers() -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(H_UA, HeaderValue::from_static(USER_AGENT));
+    headers.insert(H_REFERER, HeaderValue::from_static(REFERER));
+    headers.insert(ORIGIN, HeaderValue::from_static(REFERER));
+    headers
+}
+
+/// Client for video downloads. Unlike the API client, this must NOT set a
+/// total request timeout — reqwest's `timeout` covers the entire body read,
+/// which kills any download longer than the limit ("error decoding response
+/// body"). Downloads instead get a connect timeout and a per-read stall
+/// timeout, so a hung connection still errors out but a slow multi-minute
+/// download does not.
+pub fn download_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .default_headers(default_headers())
+        .connect_timeout(Duration::from_secs(15))
+        .read_timeout(Duration::from_secs(30))
+        .build()
+        .context("building download client")
+}
+
 impl AllAnimeClient {
     pub fn new() -> Result<Self> {
-        let mut headers = HeaderMap::new();
-        headers.insert(H_UA, HeaderValue::from_static(USER_AGENT));
-        headers.insert(H_REFERER, HeaderValue::from_static(REFERER));
-        headers.insert(ORIGIN, HeaderValue::from_static(REFERER));
         let client = reqwest::Client::builder()
-            .default_headers(headers)
+            .default_headers(default_headers())
             .timeout(Duration::from_secs(20))
             .build()
             .context("building reqwest client")?;

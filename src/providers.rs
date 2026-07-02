@@ -343,7 +343,7 @@ pub async fn resolve_all(
         match resolve(client, s).await {
             Ok(streams) => streams,
             Err(e) => {
-                eprintln!("  ! provider {} failed: {e}", s.source_name);
+                eprintln!("  ! provider {} failed: {e:#}", s.source_name);
                 Vec::new()
             }
         }
