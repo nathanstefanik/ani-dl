@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub download: DownloadConfig,
@@ -28,13 +28,11 @@ pub struct DownloadConfig {
 pub struct ApiConfig {
     /// AES key hex, refreshed by the sync daemon when upstream rotates.
     pub allanime_key: String,
-    pub translation_type: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SyncConfig {
-    pub enabled: bool,
     pub interval_hours: u64,
     pub test_show_id: String,
     pub test_episode: String,
@@ -56,7 +54,6 @@ impl Default for ApiConfig {
     fn default() -> Self {
         Self {
             allanime_key: crate::constants::allanime_key_hex(),
-            translation_type: "sub".to_string(),
         }
     }
 }
@@ -64,21 +61,10 @@ impl Default for ApiConfig {
 impl Default for SyncConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
             interval_hours: 24,
             // "One Piece" long-running show id used for provider health checks.
             test_show_id: "ReooPAxPMsHM4KPMY".to_string(),
             test_episode: "1".to_string(),
-        }
-    }
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            download: DownloadConfig::default(),
-            api: ApiConfig::default(),
-            sync: SyncConfig::default(),
         }
     }
 }

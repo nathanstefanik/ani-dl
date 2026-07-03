@@ -1,8 +1,7 @@
 //! ratatui-based search and episode-selection UI.
 //!
-//! Two phases share an [`AppState`]. Each phase runs its own terminal session
-//! (setup/teardown) so async work can happen between them without holding the
-//! alternate screen.
+//! Each phase runs its own terminal session (setup/teardown) so async work can
+//! happen between them without holding the alternate screen.
 
 use std::io::{self, Stdout};
 
@@ -20,14 +19,6 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use ratatui::Terminal;
 
 use crate::api::ShowResult;
-
-#[allow(dead_code)]
-pub enum AppState {
-    Search,
-    EpisodeSelect,
-    Downloading,
-    Done,
-}
 
 type Tui = Terminal<CrosstermBackend<Stdout>>;
 
@@ -92,7 +83,7 @@ fn run_search(terminal: &mut Tui, shows: &[ShowResult]) -> Result<Option<usize>>
                 .block(Block::default().borders(Borders::ALL).title(" ani-dl — search (Enter select, Esc quit) "))
                 .highlight_style(Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD))
                 .highlight_symbol("> ");
-            f.render_stateful_widget(list, chunks[0], &mut state.clone());
+            f.render_stateful_widget(list, chunks[0], &mut state);
 
             let prompt = Paragraph::new(format!("Search: {input}"))
                 .block(Block::default().borders(Borders::ALL));
@@ -173,7 +164,7 @@ fn run_episodes(terminal: &mut Tui, episodes: &[String]) -> Result<Vec<String>> 
                 .block(Block::default().borders(Borders::ALL).title(" select episodes "))
                 .highlight_style(Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD))
                 .highlight_symbol("> ");
-            f.render_stateful_widget(list, chunks[1], &mut state.clone());
+            f.render_stateful_widget(list, chunks[1], &mut state);
         })?;
 
         if let Event::Key(key) = event::read()? {

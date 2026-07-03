@@ -24,7 +24,13 @@ use providers::{resolve_all, select_quality};
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let mut cfg = Config::load().unwrap_or_default();
+    let mut cfg = Config::load().unwrap_or_else(|e| {
+        eprintln!("config error: {e:#} — using defaults");
+        Config::default()
+    });
+    if !cfg.api.allanime_key.is_empty() {
+        constants::set_active_key(cfg.api.allanime_key.clone());
+    }
 
     match &cli.command {
         Some(Command::Sync { daemon }) => {
@@ -64,11 +70,10 @@ async fn run_download(cli: &Cli, cfg: &Config) -> Result<()> {
         TranslationType::Sub
     };
     let concurrency = cli.concurrency.unwrap_or(cfg.download.concurrency);
-    let quality = if cli.quality.is_empty() {
-        cfg.download.quality.clone()
-    } else {
-        cli.quality.clone()
-    };
+    let quality = cli
+        .quality
+        .clone()
+        .unwrap_or_else(|| cfg.download.quality.clone());
     let out_dir = PathBuf::from(
         cli.download_dir
             .clone()
@@ -122,7 +127,15 @@ async fn run_download(cli: &Cli, cfg: &Config) -> Result<()> {
     let mut failures = 0;
     for ep in &episodes {
         eprintln!("\n=== Episode {ep} ===");
-        let sources = api.episode_sources(&show.id, ep, mode).await?;
+        // Keep the loop failure-tolerant: one bad episode must not abort the batch.
+        let sources = match api.episode_sources(&show.id, ep, mode).await {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("  ! failed to fetch sources for episode {ep}: {e:#}");
+                failures += 1;
+                continue;
+            }
+        };
         let names: Vec<&str> = sources.iter().map(|s| s.source_name.as_str()).collect();
         eprintln!("  providers: {}", if names.is_empty() { "(none)".to_string() } else { names.join(", ") });
         let streams = resolve_all(&api.client, &sources).await;
@@ -132,15 +145,10 @@ async fn run_download(cli: &Cli, cfg: &Config) -> Result<()> {
             if streams.is_empty() {
                 eprintln!("  (no streams resolved)");
             }
-            let mut ordered = streams.clone();
-            ordered.sort_by(|a, b| b.height.cmp(&a.height));
+            let mut ordered: Vec<&providers::Stream> = streams.iter().collect();
+            ordered.sort_by_key(|s| std::cmp::Reverse(s.height));
             for s in &ordered {
-                let h = if s.height > 0 {
-                    format!("{}p", s.height)
-                } else {
-                    "????".to_string()
-                };
-                println!("  [{:>10}] {:>5}  {}", s.provider, h, s.url);
+                println!("  [{:>10}] {:>5}  {}", s.provider, fmt_height(s.height), s.url);
             }
             continue;
         }
@@ -150,12 +158,7 @@ async fn run_download(cli: &Cli, cfg: &Config) -> Result<()> {
             failures += 1;
             continue;
         };
-        let h = if chosen.height > 0 {
-            format!("{}p", chosen.height)
-        } else {
-            "unknown".to_string()
-        };
-        eprintln!("  source: {} ({})", chosen.provider, h);
+        eprintln!("  source: {} ({})", chosen.provider, fmt_height(chosen.height));
         eprintln!("  url: {}", chosen.url);
 
         std::fs::create_dir_all(&out_dir)?;
@@ -197,6 +200,11 @@ async fn run_download(cli: &Cli, cfg: &Config) -> Result<()> {
     Ok(())
 }
 
+/// "1080p", or "???" when the height is unknown (0).
+fn fmt_height(h: u32) -> String {
+    if h > 0 { format!("{h}p") } else { "???".to_string() }
+}
+
 /// "yt (1080p), hls (720p), mp4upload (???)" — one entry per resolved stream.
 fn summarize_streams(streams: &[providers::Stream]) -> String {
     if streams.is_empty() {
@@ -204,14 +212,7 @@ fn summarize_streams(streams: &[providers::Stream]) -> String {
     }
     streams
         .iter()
-        .map(|s| {
-            let h = if s.height > 0 {
-                format!("{}p", s.height)
-            } else {
-                "???".to_string()
-            };
-            format!("{} ({h})", s.provider)
-        })
+        .map(|s| format!("{} ({})", s.provider, fmt_height(s.height)))
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -239,14 +240,9 @@ fn pick_episodes(available: &[String], cli: &Cli) -> Result<Vec<String>> {
     if cli.no_tui {
         anyhow::bail!("--no-tui requires -e <RANGE> to pick episodes");
     }
-    let chosen = tui::select_episodes(available.to_vec())?;
-    let mut chosen = chosen;
-    chosen.sort_by(|a, b| {
-        let fa: f64 = a.parse().unwrap_or(0.0);
-        let fb: f64 = b.parse().unwrap_or(0.0);
-        fa.partial_cmp(&fb).unwrap_or(std::cmp::Ordering::Equal)
-    });
-    Ok(chosen)
+    // `available` is already sorted by api::episode_list and the TUI preserves
+    // its order, so no re-sort is needed.
+    tui::select_episodes(available.to_vec())
 }
 
 /// Expand "1", "1-12", "1 2 5", "1,3,5" against the available episode list.
@@ -260,9 +256,14 @@ fn parse_episode_arg(arg: &str, available: &[String]) -> Vec<String> {
         }
         if let Some((lo, hi)) = token.split_once('-') {
             if let (Ok(lo), Ok(hi)) = (lo.parse::<u32>(), hi.parse::<u32>()) {
-                for n in lo..=hi {
-                    picked.push(n.to_string());
-                }
+                // Walk the available list rather than lo..=hi, so a typo like
+                // "1-9999999" cannot expand into millions of strings.
+                picked.extend(
+                    available
+                        .iter()
+                        .filter(|ep| ep.parse::<u32>().is_ok_and(|n| (lo..=hi).contains(&n)))
+                        .cloned(),
+                );
                 continue;
             }
         }

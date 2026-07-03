@@ -16,9 +16,9 @@ pub struct Cli {
     #[arg(short = 'd', long = "download-dir")]
     pub download_dir: Option<String>,
 
-    /// Video quality: best | worst | 1080 | 720 | 480.
-    #[arg(short = 'q', long, default_value = "best")]
-    pub quality: String,
+    /// Video quality: best | worst | 1080 | 720 | 480 (default: config value).
+    #[arg(short = 'q', long)]
+    pub quality: Option<String>,
 
     /// Episode range: "1", "1-12", "1 2 5" (bypasses TUI selection).
     #[arg(short = 'e', long)]

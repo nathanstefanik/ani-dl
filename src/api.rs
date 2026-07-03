@@ -218,7 +218,10 @@ impl AllAnimeClient {
                 .send()
                 .await
                 .context("episode_sources POST failed")?;
-            text = resp.text().await.unwrap_or_default();
+            text = resp
+                .text()
+                .await
+                .context("episode_sources: reading POST body")?;
         }
 
         Ok(providers::parse_source_urls(&text))

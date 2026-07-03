@@ -11,10 +11,10 @@ use sha2::{Digest, Sha256};
 
 use crate::api::{AllAnimeClient, TranslationType};
 use crate::config::{config_dir, Config};
-use crate::constants::{allanime_key_hex, ANICLI_RAW_URL, KEY_SEED};
+use crate::constants::{active_key_hex, ANICLI_RAW_URL, KEY_SEED};
 use crate::providers;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 pub struct SyncReport {
     pub changed: bool,
     pub upstream_seed: Option<String>,
@@ -94,7 +94,9 @@ pub async fn sync_anicli_source(cfg: &mut Config) -> Result<SyncReport> {
                 hex::encode(h.finalize())
             };
             cfg.api.allanime_key = new_key.clone();
-            cfg.save().ok();
+            if let Err(e) = cfg.save() {
+                log_line(&format!("FAILED to save rotated key: {e:#}"))?;
+            }
             let note = format!(
                 "KEY ROTATED: seed '{}' -> '{}' (new key {}). Update constants.rs KEY_SEED.",
                 KEY_SEED, seed, &new_key[..12]
@@ -221,8 +223,7 @@ pub async fn run_once(cfg: &mut Config, print: bool) -> Result<()> {
         println!("\nWrote {}", dir.join("provider_health.json").display());
         println!("Wrote {}", dir.join("sync.log").display());
     }
-    // Reference the hex helper so the current key is always logged.
-    log_line(&format!("run_once complete (active key {}...)", &allanime_key_hex()[..12]))?;
+    log_line(&format!("run_once complete (active key {}...)", &active_key_hex()[..12]))?;
     Ok(())
 }
 

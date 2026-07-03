@@ -8,7 +8,7 @@ use ctr::cipher::{KeyIvInit, StreamCipher};
 use futures::future::join_all;
 use regex::Regex;
 
-use crate::constants::{allanime_key_hex, ALLANIME_BASE, MP4UPLOAD_REFERER, REFERER};
+use crate::constants::{active_key_hex, ALLANIME_BASE, MP4UPLOAD_REFERER, REFERER};
 
 type Aes256Ctr = ctr::Ctr128BE<aes::Aes256>;
 
@@ -47,7 +47,7 @@ pub fn decrypt_source_list(b64: &str) -> Result<String> {
     let ctr_hex = format!("{iv_hex}00000002");
     let ciphertext = &blob[13..blob.len() - 16];
 
-    let key = hex::decode(allanime_key_hex())?;
+    let key = hex::decode(active_key_hex())?;
     let iv = hex::decode(&ctr_hex)?;
     let mut cipher = Aes256Ctr::new(key.as_slice().into(), iv.as_slice().into());
     let mut buf = ciphertext.to_vec();
@@ -61,6 +61,11 @@ pub fn decode_source_url(url: &str) -> String {
     let Some(hexstr) = url.strip_prefix("--") else {
         return url.to_string();
     };
+    // Byte-offset slicing below panics on non-ASCII; the API controls this
+    // string, so refuse to decode rather than crash.
+    if !hexstr.is_ascii() {
+        return url.to_string();
+    }
     let bytes = hexstr.as_bytes();
     let mut out = String::with_capacity(bytes.len() / 2);
     let mut i = 0;
@@ -358,7 +363,7 @@ pub fn select_quality<'a>(streams: &'a [Stream], quality: &str) -> Option<&'a St
         return None;
     }
     let mut ordered: Vec<&Stream> = streams.iter().collect();
-    ordered.sort_by(|a, b| b.height.cmp(&a.height));
+    ordered.sort_by_key(|s| std::cmp::Reverse(s.height));
 
     match quality {
         "best" => Some(ordered[0]),

@@ -145,6 +145,14 @@ impl HlsDownloader {
             }
         };
 
+        // Unsupported playlist styles would silently produce corrupt output:
+        // without the EXT-X-MAP init segment the concatenation is unplayable,
+        // and without Range headers each EXT-X-BYTERANGE fetch grabs the whole
+        // file. Fail loudly instead.
+        if media.segments.iter().any(|s| s.map.is_some() || s.byte_range.is_some()) {
+            return Err(anyhow!("fMP4 / byte-range HLS playlists are not supported"));
+        }
+
         let seg_base = base_url(&media_url);
         let start_seq = media.media_sequence;
 
@@ -261,7 +269,7 @@ impl HlsDownloader {
                 if variants.is_empty() {
                     return Err(anyhow!("master playlist has no variants"));
                 }
-                variants.sort_by(|a, b| b.0.cmp(&a.0));
+                variants.sort_by_key(|v| std::cmp::Reverse(v.0));
                 let chosen = pick_variant(&variants, quality);
                 Ok(chosen)
             }

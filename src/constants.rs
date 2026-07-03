@@ -4,6 +4,8 @@
 //! implementation), NOT the stale literals in older docs. The `sync` module
 //! re-validates them daily against upstream.
 
+use std::sync::OnceLock;
+
 use sha2::{Digest, Sha256};
 
 pub const ALLANIME_BASE: &str = "allanime.day";
@@ -27,4 +29,18 @@ pub fn allanime_key_hex() -> String {
     let mut hasher = Sha256::new();
     hasher.update(KEY_SEED.as_bytes());
     hex::encode(hasher.finalize())
+}
+
+static ACTIVE_KEY: OnceLock<String> = OnceLock::new();
+
+/// Override the compile-time key with the config's value (which the sync
+/// daemon rewrites when upstream rotates the seed). Call once at startup.
+pub fn set_active_key(hex: String) {
+    let _ = ACTIVE_KEY.set(hex);
+}
+
+/// The key decryption should actually use: the config override if set,
+/// otherwise the compile-time default.
+pub fn active_key_hex() -> String {
+    ACTIVE_KEY.get().cloned().unwrap_or_else(allanime_key_hex)
 }
