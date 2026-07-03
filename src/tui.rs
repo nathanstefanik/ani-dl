@@ -185,6 +185,7 @@ fn run_episodes(terminal: &mut Tui, episodes: &[String]) -> Result<Vec<String>> 
                 KeyCode::Char(' ') => {
                     if let Some(i) = state.selected() {
                         selected[i] = !selected[i];
+                        move_sel(&mut state, episodes.len(), 1);
                     }
                 }
                 KeyCode::Char('a') => {
