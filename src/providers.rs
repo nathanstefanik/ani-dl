@@ -2,6 +2,8 @@
 //!
 //! Ported from the Python `providers.py`. No video player is ever referenced.
 
+use std::sync::LazyLock;
+
 use anyhow::{anyhow, Result};
 use base64::Engine;
 use ctr::cipher::{KeyIvInit, StreamCipher};
@@ -11,6 +13,25 @@ use regex::Regex;
 use crate::constants::{active_key_hex, ALLANIME_BASE, MP4UPLOAD_REFERER, REFERER};
 
 type Aes256Ctr = ctr::Ctr128BE<aes::Aes256>;
+
+static RE_TOBEPARSED: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#""tobeparsed":"([^"]*)""#).unwrap());
+static RE_BLOCK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\{[^{}]*\}").unwrap());
+static RE_SOURCE_URL: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#""sourceUrl":"([^"]*)""#).unwrap());
+static RE_SOURCE_NAME: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#""sourceName":"([^"]*)""#).unwrap());
+static RE_HEIGHT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(\d{3,4})").unwrap());
+static RE_WIXMP: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"/,([^/]*),/mp4").unwrap());
+static RE_URLSET: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\.urlset.*").unwrap());
+static RE_COMMA: LazyLock<Regex> = LazyLock::new(|| Regex::new(r",[^/]*").unwrap());
+static RE_RESOLUTION: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"RESOLUTION=\d+x(\d+)").unwrap());
+static RE_MP4_SRC: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"src:\s*"([^"]*)""#).unwrap());
+static RE_M3U8_LINK: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#""(?:link|url)":"([^"]*\.m3u8[^"]*)""#).unwrap());
 
 #[derive(Debug, Clone)]
 pub struct SourceUrl {
@@ -112,10 +133,7 @@ fn collect_sources(v: &serde_json::Value, out: &mut Vec<SourceUrl>) {
 pub fn parse_source_urls(text: &str) -> Vec<SourceUrl> {
     let mut body = text.to_string();
     if body.contains("\"tobeparsed\"") {
-        if let Some(cap) = Regex::new(r#""tobeparsed":"([^"]*)""#)
-            .ok()
-            .and_then(|re| re.captures(&body))
-        {
+        if let Some(cap) = RE_TOBEPARSED.captures(&body) {
             if let Ok(decrypted) = decrypt_source_list(&cap[1]) {
                 body = decrypted;
             }
@@ -132,12 +150,9 @@ pub fn parse_source_urls(text: &str) -> Vec<SourceUrl> {
 
     // Regex fallback for partial / non-JSON payloads.
     let clean = body.replace("\\u002F", "/").replace("\\/", "/");
-    let block_re = Regex::new(r"\{[^{}]*\}").unwrap();
-    let su_re = Regex::new(r#""sourceUrl":"([^"]*)""#).unwrap();
-    let sn_re = Regex::new(r#""sourceName":"([^"]*)""#).unwrap();
-    for block in block_re.find_iter(&clean) {
-        if let Some(su) = su_re.captures(block.as_str()) {
-            let sn = sn_re
+    for block in RE_BLOCK.find_iter(&clean) {
+        if let Some(su) = RE_SOURCE_URL.captures(block.as_str()) {
+            let sn = RE_SOURCE_NAME
                 .captures(block.as_str())
                 .map(|c| c[1].to_string())
                 .unwrap_or_default();
@@ -153,26 +168,23 @@ pub fn parse_source_urls(text: &str) -> Vec<SourceUrl> {
 // --- per-provider resolution -------------------------------------------------
 
 fn height_from(text: &str) -> u32 {
-    Regex::new(r"(\d{3,4})")
-        .ok()
-        .and_then(|re| re.captures(text))
+    RE_HEIGHT
+        .captures(text)
         .and_then(|c| c[1].parse().ok())
         .unwrap_or(0)
 }
 
 fn expand_wixmp(url: &str) -> Vec<Stream> {
-    let Some(caps) = Regex::new(r"/,([^/]*),/mp4").unwrap().captures(url) else {
+    let Some(caps) = RE_WIXMP.captures(url) else {
         return Vec::new();
     };
     let list = caps[1].to_string();
-    let extract = Regex::new(r"\.urlset.*")
-        .unwrap()
+    let extract = RE_URLSET
         .replace(&url.replace("repackager.wixmp.com/", ""), "")
         .to_string();
-    let comma_re = Regex::new(r",[^/]*").unwrap();
     let mut out = Vec::new();
     for q in list.split(',').filter(|q| !q.is_empty()) {
-        let variant = comma_re.replace(&extract, q).to_string();
+        let variant = RE_COMMA.replace(&extract, q).to_string();
         out.push(Stream {
             height: height_from(q),
             url: variant,
@@ -196,12 +208,11 @@ async fn expand_m3u8_master(
         return Vec::new();
     }
     let base = url.rsplit_once('/').map(|(b, _)| b).unwrap_or("").to_string();
-    let res_re = Regex::new(r"RESOLUTION=\d+x(\d+)").unwrap();
     let lines: Vec<&str> = text.lines().collect();
     let mut out = Vec::new();
     for (i, line) in lines.iter().enumerate() {
         if line.starts_with("#EXT-X-STREAM-INF") && i + 1 < lines.len() {
-            let height = res_re
+            let height = RE_RESOLUTION
                 .captures(line)
                 .and_then(|c| c[1].parse().ok())
                 .unwrap_or(0);
@@ -240,7 +251,7 @@ pub async fn resolve(
     if link.contains("mp4upload") {
         let resp = client.get(&link).header("Referer", REFERER).send().await?;
         let html = resp.text().await?;
-        if let Some(cap) = Regex::new(r#"src:\s*"([^"]*)""#).unwrap().captures(&html) {
+        if let Some(cap) = RE_MP4_SRC.captures(&html) {
             return Ok(vec![Stream {
                 height: 0,
                 url: cap[1].to_string(),
@@ -298,7 +309,7 @@ pub async fn resolve(
     }
     if raw.is_empty() {
         // Regex fallback: any m3u8 url in the body.
-        let re = Regex::new(r#""(?:link|url)":"([^"]*\.m3u8[^"]*)""#).unwrap();
+        let re = &RE_M3U8_LINK;
         for cap in re.captures_iter(&text) {
             raw.push(Stream {
                 height: 0,

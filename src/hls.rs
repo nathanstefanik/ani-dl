@@ -159,10 +159,8 @@ impl HlsDownloader {
         // 3. Pre-fetch any AES-128 keys referenced by the playlist.
         let key_cache = self.prefetch_keys(&media, &seg_base).await?;
 
-        // 4. Download all segments in parallel into a temp dir.
-        let tmp_dir = out_path.with_extension("segments");
-        tokio::fs::create_dir_all(&tmp_dir).await?;
-
+        // 4. Download all segments in parallel, then concat in memory (no temp
+        // segment files — writing each .ts to disk and reading it back doubled I/O).
         let n = media.segments.len();
         let dur: f32 = media.segments.iter().map(|s| s.duration).sum();
         eprintln!(
@@ -201,47 +199,43 @@ impl HlsDownloader {
             let referer = self.referer.clone();
             let retries = self.retries;
             let key_cache = &key_cache;
-            let tmp_dir = tmp_dir.clone();
             let pb = pb.clone();
             async move {
                 let bytes = download_segment(&client, &job.url, &referer, retries)
                     .await
                     .with_context(|| format!("segment {} ({})", job.index, job.url))?;
                 let bytes = maybe_decrypt(bytes, &job, key_cache)?;
-                let seg_path = tmp_dir.join(format!("seg_{:05}.ts", job.index));
-                tokio::fs::write(&seg_path, &bytes).await?;
                 pb.inc(1);
-                Ok::<usize, anyhow::Error>(job.index)
+                Ok::<(usize, Vec<u8>), anyhow::Error>((job.index, bytes))
             }
         }))
         .buffer_unordered(self.concurrency)
         .collect::<Vec<_>>()
         .await;
 
-        for r in &results {
-            if let Err(e) = r {
-                pb.finish_and_clear();
-                let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
-                return Err(anyhow!("segment download failed: {e:#}"));
+        let mut segments: Vec<(usize, Vec<u8>)> = Vec::with_capacity(n);
+        for r in results {
+            match r {
+                Ok(seg) => segments.push(seg),
+                Err(e) => {
+                    pb.finish_and_clear();
+                    return Err(anyhow!("segment download failed: {e:#}"));
+                }
             }
         }
         pb.finish_and_clear();
+        segments.sort_by_key(|(i, _)| *i);
 
-        // 5. Concatenate segments in order into a .part file, then rename, so
-        // a crash mid-concat never leaves a half-written .mp4.
+        // 5. Concatenate in order into a .part file, then rename, so a crash
+        // mid-concat never leaves a half-written .mp4.
         eprintln!("  concatenating {n} segments...");
         let part_path = out_path.with_extension("mp4.part");
         let mut out = tokio::fs::File::create(&part_path).await?;
-        for i in 0..n {
-            let seg_path = tmp_dir.join(format!("seg_{:05}.ts", i));
-            let data = tokio::fs::read(&seg_path).await?;
+        for (_, data) in segments {
             out.write_all(&data).await?;
         }
         out.flush().await?;
         tokio::fs::rename(&part_path, out_path).await?;
-
-        // 6. Clean up temp segments.
-        let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
         Ok(out_path.to_path_buf())
     }
 
@@ -285,26 +279,30 @@ impl HlsDownloader {
         seg_base: &str,
     ) -> Result<HashMap<String, Vec<u8>>> {
         let mut cache: HashMap<String, Vec<u8>> = HashMap::new();
+        let mut current_key: Option<Key> = None;
         for seg in &media.segments {
-            if let Some(key) = &seg.key {
-                if key.method == KeyMethod::AES128 {
-                    if let Some(uri) = &key.uri {
-                        if !cache.contains_key(uri) {
-                            let key_url = join_url(seg_base, uri);
-                            let bytes = self
-                                .client
-                                .get(&key_url)
-                                .header("Referer", &self.referer)
-                                .send()
-                                .await?
-                                .error_for_status()?
-                                .bytes()
-                                .await?;
-                            cache.insert(uri.clone(), bytes.to_vec());
-                        }
-                    }
-                }
+            if seg.key.is_some() {
+                current_key = seg.key.clone();
             }
+            let Some(key) = &current_key else { continue };
+            if key.method != KeyMethod::AES128 {
+                continue;
+            }
+            let Some(uri) = &key.uri else { continue };
+            if cache.contains_key(uri) {
+                continue;
+            }
+            let key_url = join_url(seg_base, uri);
+            let bytes = self
+                .client
+                .get(&key_url)
+                .header("Referer", &self.referer)
+                .send()
+                .await?
+                .error_for_status()?
+                .bytes()
+                .await?;
+            cache.insert(uri.clone(), bytes.to_vec());
         }
         Ok(cache)
     }

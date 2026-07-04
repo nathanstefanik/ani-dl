@@ -48,6 +48,10 @@ pub struct Cli {
     #[arg(long = "no-tui")]
     pub no_tui: bool,
 
+    /// Re-download episodes even when the output file already exists.
+    #[arg(short = 'f', long)]
+    pub force: bool,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }

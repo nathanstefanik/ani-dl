@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
+use futures::future::join_all;
 use regex::Regex;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -134,8 +135,7 @@ pub async fn validate_providers(
     let api = AllAnimeClient::new()?;
     let sources = api.episode_sources(show_id, ep, mode).await?;
 
-    let mut results = Vec::new();
-    for src in &sources {
+    let futs = sources.iter().map(|src| async {
         let start = Instant::now();
         let resolved = providers::resolve(&api.client, src).await;
         let latency = start.elapsed().as_millis();
@@ -151,25 +151,26 @@ pub async fn validate_providers(
                         "other".to_string()
                     }
                 });
-                results.push(ProviderResult {
+                ProviderResult {
                     source_name: src.source_name.clone(),
                     ok: !streams.is_empty(),
                     latency_ms: latency,
                     stream_count: streams.len(),
                     sample_url: sample,
                     format,
-                });
+                }
             }
-            Err(_) => results.push(ProviderResult {
+            Err(_) => ProviderResult {
                 source_name: src.source_name.clone(),
                 ok: false,
                 latency_ms: latency,
                 stream_count: 0,
                 sample_url: None,
                 format: None,
-            }),
+            },
         }
-    }
+    });
+    let results = join_all(futs).await;
 
     let report = ProviderHealthReport {
         timestamp: Utc::now().to_rfc3339(),

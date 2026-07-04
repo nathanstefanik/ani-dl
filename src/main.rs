@@ -10,6 +10,7 @@ mod sync;
 mod tui;
 
 use std::path::PathBuf;
+use std::sync::LazyLock;
 
 use anyhow::Result;
 use clap::Parser;
@@ -125,8 +126,10 @@ async fn run_download(cli: &Cli, cfg: &Config) -> Result<()> {
     let dl_client = api::download_client()?;
 
     let mut failures = 0;
-    for ep in &episodes {
-        eprintln!("\n=== Episode {ep} ===");
+    let mut skipped = 0;
+    let total = episodes.len();
+    for (i, ep) in episodes.iter().enumerate() {
+        eprintln!("\n=== Episode {ep} ({}/{total}) ===", i + 1);
         // Keep the loop failure-tolerant: one bad episode must not abort the batch.
         let sources = match api.episode_sources(&show.id, ep, mode).await {
             Ok(s) => s,
@@ -164,6 +167,18 @@ async fn run_download(cli: &Cli, cfg: &Config) -> Result<()> {
         std::fs::create_dir_all(&out_dir)?;
         let filename = build_filename(&show.name, cli.season, ep);
         let out_path = out_dir.join(format!("{filename}.mp4"));
+
+        if out_path.exists() && !cli.force {
+            let size = std::fs::metadata(&out_path).map(|m| m.len()).unwrap_or(0);
+            eprintln!(
+                "  skipping: {} already exists ({})",
+                out_path.display(),
+                indicatif::HumanBytes(size),
+            );
+            skipped += 1;
+            continue;
+        }
+
         eprintln!("  saving to: {}", out_path.display());
 
         let dl = HlsDownloader::new(
@@ -196,6 +211,9 @@ async fn run_download(cli: &Cli, cfg: &Config) -> Result<()> {
 
     if failures > 0 {
         anyhow::bail!("{failures} episode(s) failed");
+    }
+    if skipped > 0 {
+        eprintln!("\nSkipped {skipped} existing file(s) (use -f/--force to re-download).");
     }
     Ok(())
 }
@@ -282,12 +300,13 @@ fn parse_episode_arg(arg: &str, available: &[String]) -> Vec<String> {
     result
 }
 
+static RE_UNSAFE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[^\w\s-]").unwrap());
+static RE_WS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[\s_]+").unwrap());
+
 /// "Tongari.Boushi.no.Atelier.S01E13" (extension added by the downloader).
 fn build_filename(name: &str, season: u32, episode: &str) -> String {
-    let unsafe_re = Regex::new(r"[^\w\s-]").unwrap();
-    let ws_re = Regex::new(r"[\s_]+").unwrap();
-    let cleaned = unsafe_re.replace_all(name, "");
-    let dotted = ws_re.replace_all(cleaned.trim(), ".");
+    let cleaned = RE_UNSAFE.replace_all(name, "");
+    let dotted = RE_WS.replace_all(cleaned.trim(), ".");
     let dotted = dotted.trim_matches('.');
     let title = if dotted.is_empty() { "anime" } else { dotted };
 
