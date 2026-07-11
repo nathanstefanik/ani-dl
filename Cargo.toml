@@ -8,12 +8,18 @@ description = "Rust CLI for downloading anime (ani-cli UX, no playback, no ffmpe
 name = "ani-dl"
 path = "src/main.rs"
 
+[[bin]]
+name = "ani-dl-minter"
+path = "src/bin/ani-dl-minter.rs"
+
 [dependencies]
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs", "io-util", "time", "signal"] }
+async-trait = "0.1"
+aes-gcm = "0.10"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs", "io-util", "time", "signal", "process", "net"] }
 reqwest = { version = "0.12", features = ["json", "stream"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 ratatui = "0.27"
 crossterm = "0.27"
 m3u8-rs = "6"

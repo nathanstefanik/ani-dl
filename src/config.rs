@@ -12,6 +12,7 @@ pub struct Config {
     pub download: DownloadConfig,
     pub api: ApiConfig,
     pub sync: SyncConfig,
+    pub minter: MinterConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,6 +37,30 @@ pub struct SyncConfig {
     pub interval_hours: u64,
     pub test_show_id: String,
     pub test_episode: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MinterConfig {
+    /// `none` (default), `stdio`, or `http`.
+    pub transport: String,
+    /// Subprocess command for stdio binding (default: ani-dl-minter).
+    pub command: String,
+}
+
+impl Default for MinterConfig {
+    fn default() -> Self {
+        Self {
+            transport: "none".to_string(),
+            command: "ani-dl-minter".to_string(),
+        }
+    }
+}
+
+impl MinterConfig {
+    pub fn is_enabled(&self) -> bool {
+        matches!(self.transport.as_str(), "stdio" | "http")
+    }
 }
 
 impl Default for DownloadConfig {

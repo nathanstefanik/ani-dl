@@ -33,9 +33,11 @@ static RE_MP4_SRC: LazyLock<Regex> =
 static RE_M3U8_LINK: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#""(?:link|url)":"([^"]*\.m3u8[^"]*)""#).unwrap());
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SourceUrl {
+    #[serde(rename = "sourceName", alias = "source_name")]
     pub source_name: String,
+    #[serde(rename = "sourceUrl", alias = "source_url")]
     pub source_url: String,
 }
 

@@ -128,11 +128,12 @@ pub async fn sync_anicli_source(cfg: &mut Config) -> Result<SyncReport> {
 
 /// Resolve every provider for a known test episode and record health.
 pub async fn validate_providers(
+    cfg: &Config,
     show_id: &str,
     ep: &str,
     mode: TranslationType,
 ) -> Result<ProviderHealthReport> {
-    let api = AllAnimeClient::new()?;
+    let api = AllAnimeClient::new(cfg).await?;
     let sources = api.episode_sources(show_id, ep, mode).await?;
 
     let futs = sources.iter().map(|src| async {
@@ -204,9 +205,13 @@ pub async fn run_once(cfg: &mut Config, print: bool) -> Result<()> {
         }
     }
 
-    let health =
-        validate_providers(&cfg.sync.test_show_id, &cfg.sync.test_episode, TranslationType::Sub)
-            .await?;
+    let health = validate_providers(
+        cfg,
+        &cfg.sync.test_show_id,
+        &cfg.sync.test_episode,
+        TranslationType::Sub,
+    )
+    .await?;
     if print {
         println!("\nProvider health (show {}, ep {}):", health.show_id, health.episode);
         for p in &health.providers {
@@ -225,6 +230,12 @@ pub async fn run_once(cfg: &mut Config, print: bool) -> Result<()> {
         println!("Wrote {}", dir.join("sync.log").display());
     }
     log_line(&format!("run_once complete (active key {}...)", &active_key_hex()[..12]))?;
+    if let Some(ctx) = crate::minter::load_persisted_context(crate::minter::ALLANIME_SOURCE) {
+        log_line(&format!(
+            "material context: referer={} buildId={} (updated {})",
+            ctx.referer, ctx.build_id, ctx.updated_at
+        ))?;
+    }
     Ok(())
 }
 

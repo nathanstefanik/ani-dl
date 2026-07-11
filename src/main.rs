@@ -5,6 +5,7 @@ mod cli;
 mod config;
 mod constants;
 mod hls;
+mod minter;
 mod providers;
 mod sync;
 mod tui;
@@ -81,7 +82,7 @@ async fn run_download(cli: &Cli, cfg: &Config) -> Result<()> {
             .unwrap_or_else(|| cfg.download.directory.clone()),
     );
 
-    let api = AllAnimeClient::new()?;
+    let api = AllAnimeClient::new(cfg).await?;
 
     // Determine query.
     let query = match &cli.query {
