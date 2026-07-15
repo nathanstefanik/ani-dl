@@ -75,6 +75,79 @@ TUI keys: type to filter search results, ↑/↓ to move, Enter to select, Esc t
 quit. In episode selection: `j`/`k` or arrows to move, `Space` to toggle, `a` to
 select/deselect all, `Enter` to confirm.
 
+## How it works
+
+`ani-dl` is split into a **core** (search, signing, stream resolution, download)
+and an optional **minter** sidecar (browser-adjacent material acquisition). The
+core never launches a browser; when AllAnime's anti-bot gate requires live
+material, the minter supplies it over a JSON-RPC seam. Full protocol details:
+[`docs/minter-protocol.md`](docs/minter-protocol.md).
+
+### Running with the minter
+
+By default the minter is **off** (`minter.transport = "none"`) and the core uses
+a legacy static-key API path. Enable the minter in
+`~/.config/ani-dl/config.toml`:
+
+```toml
+[minter]
+transport = "stdio"          # "stdio" | "http" | "none"
+command = "ani-dl-minter"    # subprocess for stdio binding
+```
+
+Both binaries are built from this repo (`cargo install --path .` installs
+`ani-dl` and `ani-dl-minter`). Put them on your `PATH`.
+
+**Stdio (default binding)** — the core spawns `ani-dl-minter` as a child on
+startup, talks NDJSON over stdin/stdout, and kills it on exit. No ports or
+handshake files.
+
+**HTTP (companion-browser binding)** — run the minter separately:
+
+```sh
+ani-dl-minter --listen 127.0.0.1:8765
+```
+
+Set `transport = "http"`. The minter writes a bearer token and port to
+`$XDG_RUNTIME_DIR/ani-dl-minter.json`; the core reads that file to connect.
+A browser userscript can push fresh material via `POST /ingest`.
+
+**Fixture mode (development)** — the reference minter has no real browser yet.
+Capture material in the browser (see [`scripts/capture-material.js`](scripts/capture-material.js)),
+save to `~/.config/ani-dl/material.json`, then run:
+
+```sh
+./scripts/ani-dl-minter-run.sh "attack on titan" -n 4 -e 1
+```
+
+The script validates the fixture, sets `ANI_DL_MINTER_FIXTURE`, and starts
+`ani-dl` — no manual env exports. For HTTP binding, use
+`scripts/minter-http-start.sh` + `scripts/minter-push.sh`.
+
+If minter init fails, the core logs a warning and falls back to the legacy path.
+
+### End-to-end flow
+
+```
+query → search (GraphQL) → pick show → list episodes → pick episodes
+  └─ for each episode:
+       ├─ [minter] material.get → cache rotating secrets + discovered context
+       ├─ [core]   sign aaReq (pure Rust recipe) → POST /api (episode query)
+       │            on AA_CRYPTO_* rejection: refresh material, degrade to
+       │            token.sign (L1) or episode.resolve (L2)
+       ├─ decrypt tobeparsed → [{sourceName, sourceUrl}, …]
+       ├─ resolve_all — probe every provider in parallel for playable URLs
+       ├─ select_quality — pick best/worst/1080/720/480
+       └─ HlsDownloader — parallel HLS segments (AES-128 in-process) or direct
+          progressive fetch → {Title}.S{NN}E{NN}.mp4
+```
+
+The minter owns WAF/browser churn (rotating `partB`, live `mask`/`buildId`,
+current `referer`/`apiBase`). The core owns everything after material is minted:
+recipe signing, GraphQL, provider probing, and the download pipeline. The
+`sync` subcommand still maintains the static AES key and provider health on a
+separate schedule; it does not replace the minter for rotating secrets.
+
 ## `ani-dl sync` — the daily maintenance daemon
 
 AllAnime periodically rotates the API. `sync` keeps ani-dl healthy:

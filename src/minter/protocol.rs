@@ -32,17 +32,3 @@ pub struct RpcError {
     pub retry_after_ms: Option<u64>,
 }
 
-impl RpcError {
-    pub fn is_expired(&self) -> bool {
-        self.code == "EXPIRED" || self.code == "STALE"
-    }
-
-    pub fn is_level_unsupported(&self) -> bool {
-        self.code == "LEVEL_UNSUPPORTED"
-    }
-}
-
-pub fn redact_secret(s: &str) -> String {
-    let prefix_len = s.len().min(8);
-    format!("{}… ({} chars)", &s[..prefix_len], s.len())
-}

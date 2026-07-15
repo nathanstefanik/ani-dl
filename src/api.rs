@@ -20,7 +20,7 @@ const SEARCH_GQL: &str = "query( $search: SearchInput $limit: Int $page: Int \
     $countryOrigin: VaildCountryOriginEnumType ) { \
     shows( search: $search limit: $limit page: $page \
     translationType: $translationType countryOrigin: $countryOrigin ) { \
-    edges { _id name availableEpisodes __typename } } }";
+    edges { _id name availableEpisodes airedStart __typename } } }";
 
 const EPISODES_LIST_GQL: &str = "query ($showId: String!) { show( _id: $showId ) \
     { _id availableEpisodesDetail } }";
@@ -50,6 +50,7 @@ pub struct ShowResult {
     pub id: String,
     pub name: String,
     pub episodes: u32,
+    pub year: u32, // airedStart.year; 0 == unknown
 }
 
 pub struct AllAnimeClient {
@@ -202,10 +203,16 @@ impl AllAnimeClient {
                 if count == 0 {
                     continue;
                 }
+                let year = e
+                    .get("airedStart")
+                    .and_then(|a| a.get("year"))
+                    .and_then(|y| y.as_u64())
+                    .unwrap_or(0) as u32;
                 out.push(ShowResult {
                     id: e.get("_id").and_then(|x| x.as_str()).unwrap_or("").to_string(),
                     name: e.get("name").and_then(|x| x.as_str()).unwrap_or("?").to_string(),
                     episodes: count,
+                    year,
                 });
             }
         }
@@ -256,12 +263,25 @@ impl AllAnimeClient {
         ep: &str,
         mode: TranslationType,
     ) -> Result<Vec<SourceUrl>> {
+        // Primary path: ani-cli's current recipe — a persisted-query GET carrying
+        // the youtu-chan referer/origin and NO aaReq. AllAnime leaves this path
+        // open and still encrypts the reply with the static `tobeparsed` key, so
+        // it needs neither the browser-gated crypto bootstrap nor the minter.
+        match self.episode_sources_direct(show_id, ep, mode).await {
+            Ok(sources) if !sources.is_empty() => return Ok(sources),
+            Ok(_) => {}
+            Err(e) => eprintln!("  ! direct API path failed: {e:#}"),
+        }
+
+        // Fallback: the aaReq minter path, only when one is configured. Kept for
+        // the day AllAnime closes the direct path again; harmless otherwise.
         if let Some((minter, caps)) = &self.minter {
             return self
                 .episode_sources_minter(minter.as_ref(), caps, show_id, ep, mode)
                 .await;
         }
-        self.episode_sources_legacy(show_id, ep, mode).await
+
+        Ok(Vec::new())
     }
 
     async fn episode_sources_minter(
@@ -309,8 +329,10 @@ impl AllAnimeClient {
             return minter.resolve(ALLANIME_SOURCE, show_id, ep, mode).await;
         }
 
-        eprintln!("  ! minter enabled but all levels failed; falling back to legacy API path");
-        self.episode_sources_legacy(show_id, ep, mode).await
+        // The direct path already ran (and failed) before we got here, so there
+        // is nothing left to try.
+        eprintln!("  ! minter enabled but all levels failed");
+        Ok(Vec::new())
     }
 
     async fn episode_sources_level0(
@@ -457,7 +479,9 @@ impl AllAnimeClient {
         Ok(text)
     }
 
-    async fn episode_sources_legacy(
+    /// The no-aaReq persisted-query GET path (ani-cli's current recipe). This is
+    /// now the primary resolver; the minter is only a fallback.
+    async fn episode_sources_direct(
         &self,
         show_id: &str,
         ep: &str,
@@ -472,7 +496,11 @@ impl AllAnimeClient {
             "persistedQuery": { "version": 1, "sha256Hash": EPISODE_QUERY_HASH }
         });
 
-        let (api_base, client) = self.api_context().await?;
+        // Pin to the hardcoded endpoint + youtu-chan header client. This path is
+        // the verified recipe and must not inherit minter material, which may
+        // carry a different referer/api_base.
+        let api_base = ALLANIME_API.to_string();
+        let client = self.client.clone();
         let mut text = String::new();
         if let Ok(resp) = client
             .get(format!("{api_base}/api"))

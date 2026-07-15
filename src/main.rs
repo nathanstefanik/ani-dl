@@ -245,7 +245,8 @@ fn pick_show(results: Vec<ShowResult>, cli: &Cli) -> Result<Option<ShowResult>> 
     }
     if cli.no_tui {
         for (i, s) in results.iter().enumerate() {
-            println!("{}\t{} ({} episodes)", i + 1, s.name, s.episodes);
+            let year = if s.year > 0 { format!(" ({})", s.year) } else { String::new() };
+            println!("{}\t{} ({} episodes){year}", i + 1, s.name, s.episodes);
         }
         anyhow::bail!("--no-tui: re-run with -n <N> to pick a result");
     }

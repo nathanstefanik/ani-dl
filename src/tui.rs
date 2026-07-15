@@ -76,7 +76,8 @@ fn run_search(terminal: &mut Tui, shows: &[ShowResult]) -> Result<Option<usize>>
                 .iter()
                 .map(|&i| {
                     let s = &shows[i];
-                    ListItem::new(Line::from(format!("{}  ({} episodes)", s.name, s.episodes)))
+                    let year = if s.year > 0 { format!(" ({})", s.year) } else { String::new() };
+                    ListItem::new(Line::from(format!("{}  ({} episodes){year}", s.name, s.episodes)))
                 })
                 .collect();
             let list = List::new(items)

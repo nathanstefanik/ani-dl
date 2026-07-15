@@ -287,6 +287,13 @@ pub async fn resolve(
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
         if let Some(links) = v.get("links").and_then(|l| l.as_array()) {
             for entry in links {
+                // ani-cli only takes hls entries hardsubbed in en-US; other
+                // languages would otherwise collide at the same height.
+                if let Some(lang) = entry.get("hardsub_lang").and_then(|x| x.as_str()) {
+                    if lang != "en-US" {
+                        continue;
+                    }
+                }
                 let url = entry
                     .get("link")
                     .or_else(|| entry.get("url"))
@@ -300,10 +307,18 @@ pub async fn resolve(
                     .filter(|h| *h > 0)
                     .or_else(|| entry.get("height").and_then(|x| x.as_u64()).map(|h| h as u32))
                     .unwrap_or(0);
+                // The clock reply may name its own Referer for the m3u8 CDN
+                // (ani-cli's m3u8_refr); the allanime referer 403s there.
+                let referer = entry
+                    .get("Referer")
+                    .or_else(|| entry.get("headers").and_then(|h| h.get("Referer")))
+                    .or_else(|| v.get("Referer"))
+                    .and_then(|x| x.as_str())
+                    .unwrap_or(REFERER);
                 raw.push(Stream {
                     height,
                     url: url.to_string(),
-                    referer: REFERER.to_string(),
+                    referer: referer.to_string(),
                     provider: name.clone(),
                 });
             }
