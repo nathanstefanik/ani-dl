@@ -109,9 +109,24 @@ async fn run_download(cli: &Cli, cfg: &Config) -> Result<()> {
     let Some(show) = show else {
         return Ok(());
     };
-    let season = match cli.season {
-        Some(n) => n,
+    let known_season = match cli.season {
+        Some(n) => Some(n),
         None => infer_season(&show, &results, &api, mode).await,
+    };
+    let season = known_season.unwrap_or(1);
+    // Once the season is known, the subtitle is redundant — S02 already says
+    // it — so name files after the franchise base ("Kaguya-sama wa
+    // Kokurasetai" instead of "... ? Tensai-tachi no Renai Zunousen").
+    let file_title = match known_season {
+        Some(_) => {
+            let base = base_title(&show.name);
+            if base.is_empty() {
+                show.name.clone()
+            } else {
+                base
+            }
+        }
+        None => show.name.clone(),
     };
     eprintln!(
         "Selected: {} ({} eps, season {season})",
@@ -193,7 +208,7 @@ async fn run_download(cli: &Cli, cfg: &Config) -> Result<()> {
         eprintln!("  url: {}", chosen.url);
 
         std::fs::create_dir_all(&out_dir)?;
-        let filename = build_filename(&show.name, season, ep);
+        let filename = build_filename(&file_title, season, ep);
         let out_path = out_dir.join(format!("{filename}.mp4"));
 
         if out_path.exists() && !cli.force {
@@ -293,28 +308,29 @@ static RE_SEASON_NUM: LazyLock<Regex> =
 static RE_ORDINAL_SEASON: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)(\d+)(?:st|nd|rd|th)\s+season").unwrap());
 
-/// Infer Sxx from the show title and sibling search hits (e.g. Kaguya S1 `:` vs S2 `?`).
+/// Infer Sxx from the show title and sibling search hits (e.g. Kaguya S1 `:`
+/// vs S2 `?`). `None` means no evidence either way — caller defaults to 1.
 async fn infer_season(
     show: &ShowResult,
     search_results: &[ShowResult],
     api: &AllAnimeClient,
     mode: TranslationType,
-) -> u32 {
+) -> Option<u32> {
     if let Some(n) = explicit_season_in_title(&show.name) {
-        return n;
+        return Some(n);
     }
     if let Some(n) = season_by_franchise_rank(show, search_results) {
-        return n;
+        return Some(n);
     }
     let prefix = franchise_key(&show.name);
     if prefix.len() >= 8 {
         if let Ok(more) = api.search(&prefix, mode).await {
             if let Some(n) = season_by_franchise_rank(show, &more) {
-                return n;
+                return Some(n);
             }
         }
     }
-    1
+    None
 }
 
 fn explicit_season_in_title(name: &str) -> Option<u32> {
@@ -323,6 +339,21 @@ fn explicit_season_in_title(name: &str) -> Option<u32> {
         .or_else(|| RE_ORDINAL_SEASON.captures(name))
         .and_then(|c| c[1].parse().ok())
         .filter(|&n| n > 0)
+}
+
+/// Original-case franchise base of a title: cut at the first subtitle
+/// separator and drop explicit season markers ("Season 2", "2nd Season").
+fn base_title(name: &str) -> String {
+    let cut = [": ", "? ", "! "]
+        .iter()
+        .filter_map(|sep| name.find(sep))
+        .min()
+        .unwrap_or(name.len());
+    let base = RE_SEASON_NUM.replace(&name[..cut], "");
+    let base = RE_ORDINAL_SEASON.replace(&base, "");
+    base.trim_end_matches(['?', '!', ':', '.', '-', ' '])
+        .trim()
+        .to_string()
 }
 
 fn franchise_key(name: &str) -> String {
@@ -520,6 +551,30 @@ mod tests {
     fn lone_result_gives_no_rank() {
         let s1 = show("a", "Sousou no Frieren", 28, 2023);
         assert_eq!(season_by_franchise_rank(&s1, &[s1.clone()]), None);
+    }
+
+    #[test]
+    fn base_title_keeps_case_and_drops_subtitle() {
+        assert_eq!(
+            base_title("Kaguya-sama wa Kokurasetai? Tensai-tachi no Renai Zunousen"),
+            "Kaguya-sama wa Kokurasetai"
+        );
+        assert_eq!(
+            base_title("Kaguya-sama wa Kokurasetai: Ultra Romantic"),
+            "Kaguya-sama wa Kokurasetai"
+        );
+        assert_eq!(base_title("Mob Psycho 100 Season 3"), "Mob Psycho 100");
+        assert_eq!(base_title("Haikyuu!! 2nd Season"), "Haikyuu");
+        assert_eq!(base_title("Sousou no Frieren"), "Sousou no Frieren");
+    }
+
+    #[test]
+    fn filename_uses_base_title_for_known_season() {
+        let base = base_title("Kaguya-sama wa Kokurasetai? Tensai-tachi no Renai Zunousen");
+        assert_eq!(
+            build_filename(&base, 2, "1"),
+            "Kaguya-sama.wa.Kokurasetai.S02E01"
+        );
     }
 
     #[test]
