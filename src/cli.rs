@@ -28,9 +28,9 @@ pub struct Cli {
     #[arg(short = 'D', long)]
     pub dubbed: bool,
 
-    /// Season number for the SxxExx filename tag.
-    #[arg(short = 's', long, default_value_t = 1)]
-    pub season: u32,
+    /// Season number for the SxxExx filename tag (auto-inferred when omitted).
+    #[arg(short = 's', long)]
+    pub season: Option<u32>,
 
     /// Auto-select the nth search result (skips TUI).
     #[arg(short = 'n', long)]

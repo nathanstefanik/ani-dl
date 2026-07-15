@@ -105,11 +105,18 @@ async fn run_download(cli: &Cli, cfg: &Config) -> Result<()> {
     }
 
     // Select show.
-    let show = pick_show(results, cli)?;
+    let show = pick_show(&results, cli)?;
     let Some(show) = show else {
         return Ok(());
     };
-    eprintln!("Selected: {} ({} eps)", show.name, show.episodes);
+    let season = match cli.season {
+        Some(n) => n,
+        None => infer_season(&show, &results, &api, mode).await,
+    };
+    eprintln!(
+        "Selected: {} ({} eps, season {season})",
+        show.name, show.episodes
+    );
 
     // Episode list.
     let available = api.episode_list(&show.id, mode).await?;
@@ -166,7 +173,7 @@ async fn run_download(cli: &Cli, cfg: &Config) -> Result<()> {
         eprintln!("  url: {}", chosen.url);
 
         std::fs::create_dir_all(&out_dir)?;
-        let filename = build_filename(&show.name, cli.season, ep);
+        let filename = build_filename(&show.name, season, ep);
         let out_path = out_dir.join(format!("{filename}.mp4"));
 
         if out_path.exists() && !cli.force {
@@ -236,7 +243,7 @@ fn summarize_streams(streams: &[providers::Stream]) -> String {
         .join(", ")
 }
 
-fn pick_show(results: Vec<ShowResult>, cli: &Cli) -> Result<Option<ShowResult>> {
+fn pick_show(results: &[ShowResult], cli: &Cli) -> Result<Option<ShowResult>> {
     if let Some(n) = cli.number {
         if n >= 1 && n <= results.len() {
             return Ok(Some(results[n - 1].clone()));
@@ -250,7 +257,98 @@ fn pick_show(results: Vec<ShowResult>, cli: &Cli) -> Result<Option<ShowResult>> 
         }
         anyhow::bail!("--no-tui: re-run with -n <N> to pick a result");
     }
-    tui::select_show(results)
+    tui::select_show(results.to_vec())
+}
+
+static RE_SEASON_NUM: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)season\s*(\d+)").unwrap());
+static RE_ORDINAL_SEASON: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)(\d+)(?:st|nd|rd|th)\s+season").unwrap());
+
+/// Infer Sxx from the show title and sibling search hits (e.g. Kaguya S1 `:` vs S2 `?`).
+async fn infer_season(
+    show: &ShowResult,
+    search_results: &[ShowResult],
+    api: &AllAnimeClient,
+    mode: TranslationType,
+) -> u32 {
+    if let Some(n) = explicit_season_in_title(&show.name) {
+        return n;
+    }
+    if let Some(n) = season_by_franchise_rank(show, search_results) {
+        return n;
+    }
+    let prefix = franchise_key(&show.name);
+    if prefix.len() >= 8 {
+        if let Ok(more) = api.search(&prefix, mode).await {
+            if let Some(n) = season_by_franchise_rank(show, &more) {
+                return n;
+            }
+        }
+    }
+    1
+}
+
+fn explicit_season_in_title(name: &str) -> Option<u32> {
+    RE_SEASON_NUM
+        .captures(name)
+        .or_else(|| RE_ORDINAL_SEASON.captures(name))
+        .and_then(|c| c[1].parse().ok())
+        .filter(|&n| n > 0)
+}
+
+fn franchise_key(name: &str) -> String {
+    let lower = name.to_lowercase();
+    let base = lower
+        .split(": ")
+        .next()
+        .or_else(|| lower.split("? ").next())
+        .unwrap_or(&lower);
+    RE_SEASON_NUM
+        .replace(base, "")
+        .trim()
+        .to_string()
+}
+
+fn is_special_entry(name: &str, episodes: u32) -> bool {
+    if episodes <= 5 {
+        return true;
+    }
+    let lower = name.to_lowercase();
+    [
+        " ova",
+        " movie",
+        "picture drama",
+        "teaser",
+        " gaiden",
+        "kanketsu-hen",
+        "chuugakkou",
+        "spinoff",
+    ]
+    .iter()
+    .any(|kw| lower.contains(kw))
+}
+
+fn season_by_franchise_rank(show: &ShowResult, search_results: &[ShowResult]) -> Option<u32> {
+    let key = franchise_key(&show.name);
+    let mut cousins: Vec<&ShowResult> = search_results
+        .iter()
+        .filter(|s| franchise_key(&s.name) == key)
+        .filter(|s| !is_special_entry(&s.name, s.episodes))
+        .collect();
+    if cousins.len() <= 1 {
+        return None;
+    }
+    cousins.sort_by(|a, b| {
+        a.year
+            .cmp(&b.year)
+            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    cousins
+        .iter()
+        .position(|s| s.id == show.id)
+        .map(|i| (i + 1) as u32)
 }
 
 fn pick_episodes(available: &[String], cli: &Cli) -> Result<Vec<String>> {

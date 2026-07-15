@@ -11,3 +11,5 @@ downloads/
 *.mp4
 *.mkv
 *.ts
+
+scripts/homelab-update.sh
