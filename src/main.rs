@@ -148,9 +148,20 @@ async fn run_download(cli: &Cli, cfg: &Config) -> Result<()> {
             }
         };
         let names: Vec<&str> = sources.iter().map(|s| s.source_name.as_str()).collect();
-        eprintln!("  providers: {}", if names.is_empty() { "(none)".to_string() } else { names.join(", ") });
+        eprintln!(
+            "  providers: {}",
+            if names.is_empty() {
+                "(none)".to_string()
+            } else {
+                names.join(", ")
+            }
+        );
         let streams = resolve_all(&api.client, &sources).await;
-        eprintln!("  resolved {} stream(s): {}", streams.len(), summarize_streams(&streams));
+        eprintln!(
+            "  resolved {} stream(s): {}",
+            streams.len(),
+            summarize_streams(&streams)
+        );
 
         if cli.list_providers {
             if streams.is_empty() {
@@ -159,7 +170,12 @@ async fn run_download(cli: &Cli, cfg: &Config) -> Result<()> {
             let mut ordered: Vec<&providers::Stream> = streams.iter().collect();
             ordered.sort_by_key(|s| std::cmp::Reverse(s.height));
             for s in &ordered {
-                println!("  [{:>10}] {:>5}  {}", s.provider, fmt_height(s.height), s.url);
+                println!(
+                    "  [{:>10}] {:>5}  {}",
+                    s.provider,
+                    fmt_height(s.height),
+                    s.url
+                );
             }
             continue;
         }
@@ -169,7 +185,11 @@ async fn run_download(cli: &Cli, cfg: &Config) -> Result<()> {
             failures += 1;
             continue;
         };
-        eprintln!("  source: {} ({})", chosen.provider, fmt_height(chosen.height));
+        eprintln!(
+            "  source: {} ({})",
+            chosen.provider,
+            fmt_height(chosen.height)
+        );
         eprintln!("  url: {}", chosen.url);
 
         std::fs::create_dir_all(&out_dir)?;
@@ -228,7 +248,11 @@ async fn run_download(cli: &Cli, cfg: &Config) -> Result<()> {
 
 /// "1080p", or "???" when the height is unknown (0).
 fn fmt_height(h: u32) -> String {
-    if h > 0 { format!("{h}p") } else { "???".to_string() }
+    if h > 0 {
+        format!("{h}p")
+    } else {
+        "???".to_string()
+    }
 }
 
 /// "yt (1080p), hls (720p), mp4upload (???)" — one entry per resolved stream.
@@ -252,7 +276,11 @@ fn pick_show(results: &[ShowResult], cli: &Cli) -> Result<Option<ShowResult>> {
     }
     if cli.no_tui {
         for (i, s) in results.iter().enumerate() {
-            let year = if s.year > 0 { format!(" ({})", s.year) } else { String::new() };
+            let year = if s.year > 0 {
+                format!(" ({})", s.year)
+            } else {
+                String::new()
+            };
             println!("{}\t{} ({} episodes){year}", i + 1, s.name, s.episodes);
         }
         anyhow::bail!("--no-tui: re-run with -n <N> to pick a result");
@@ -299,13 +327,16 @@ fn explicit_season_in_title(name: &str) -> Option<u32> {
 
 fn franchise_key(name: &str) -> String {
     let lower = name.to_lowercase();
-    let base = lower
-        .split(": ")
-        .next()
-        .or_else(|| lower.split("? ").next())
-        .unwrap_or(&lower);
+    // Cut at the earliest subtitle separator so titles that differ only in
+    // that punctuation (Kaguya S1 ": " vs S2 "? ") collapse to the same key.
+    let cut = [": ", "? ", "! "]
+        .iter()
+        .filter_map(|sep| lower.find(sep))
+        .min()
+        .unwrap_or(lower.len());
     RE_SEASON_NUM
-        .replace(base, "")
+        .replace(&lower[..cut], "")
+        .trim_end_matches(['?', '!', ':', '.'])
         .trim()
         .to_string()
 }
@@ -424,4 +455,80 @@ fn prompt(msg: &str) -> Result<String> {
     let mut line = String::new();
     io::stdin().read_line(&mut line)?;
     Ok(line.trim().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn show(id: &str, name: &str, episodes: u32, year: u32) -> ShowResult {
+        ShowResult {
+            id: id.to_string(),
+            name: name.to_string(),
+            episodes,
+            year,
+        }
+    }
+
+    #[test]
+    fn franchise_key_collapses_separator_punctuation() {
+        // Kaguya S1 uses ": ", S2 uses "? " — both must map to the same key.
+        let k1 = franchise_key("Kaguya-sama wa Kokurasetai: Tensai-tachi no Renai Zunousen");
+        let k2 = franchise_key("Kaguya-sama wa Kokurasetai? Tensai-tachi no Renai Zunousen");
+        let k3 = franchise_key("Kaguya-sama wa Kokurasetai: Ultra Romantic");
+        assert_eq!(k1, "kaguya-sama wa kokurasetai");
+        assert_eq!(k1, k2);
+        assert_eq!(k1, k3);
+    }
+
+    #[test]
+    fn franchise_key_strips_trailing_punctuation_and_season_markers() {
+        assert_eq!(franchise_key("Haikyuu!!"), "haikyuu");
+        assert_eq!(franchise_key("Haikyuu!! 2nd Season"), "haikyuu");
+        assert_eq!(franchise_key("Bocchi the Rock! 2"), "bocchi the rock");
+        assert_eq!(franchise_key("Dr. STONE Season 2"), "dr. stone");
+    }
+
+    #[test]
+    fn kaguya_season_two_ranks_second() {
+        let s1 = show(
+            "a",
+            "Kaguya-sama wa Kokurasetai: Tensai-tachi no Renai Zunousen",
+            12,
+            2019,
+        );
+        let s2 = show(
+            "b",
+            "Kaguya-sama wa Kokurasetai? Tensai-tachi no Renai Zunousen",
+            12,
+            2020,
+        );
+        let s3 = show("c", "Kaguya-sama wa Kokurasetai: Ultra Romantic", 13, 2022);
+        let ova = show(
+            "d",
+            "Kaguya-sama wa Kokurasetai: Tensai-tachi no Renai Zunousen OVA",
+            1,
+            2021,
+        );
+        let results = vec![s1.clone(), s2.clone(), s3.clone(), ova];
+        assert_eq!(season_by_franchise_rank(&s1, &results), Some(1));
+        assert_eq!(season_by_franchise_rank(&s2, &results), Some(2));
+        assert_eq!(season_by_franchise_rank(&s3, &results), Some(3));
+    }
+
+    #[test]
+    fn lone_result_gives_no_rank() {
+        let s1 = show("a", "Sousou no Frieren", 28, 2023);
+        assert_eq!(season_by_franchise_rank(&s1, &[s1.clone()]), None);
+    }
+
+    #[test]
+    fn explicit_markers_win() {
+        assert_eq!(explicit_season_in_title("Mob Psycho 100 Season 3"), Some(3));
+        assert_eq!(explicit_season_in_title("Haikyuu!! 2nd Season"), Some(2));
+        assert_eq!(
+            explicit_season_in_title("Kaguya-sama wa Kokurasetai? Tensai-tachi no Renai Zunousen"),
+            None
+        );
+    }
 }
