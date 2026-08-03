@@ -10,9 +10,7 @@ use serde::{Deserialize, Serialize};
 #[serde(default)]
 pub struct Config {
     pub download: DownloadConfig,
-    pub api: ApiConfig,
     pub sync: SyncConfig,
-    pub minter: MinterConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,47 +24,16 @@ pub struct DownloadConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct ApiConfig {
-    /// AES key hex, refreshed by the sync daemon when upstream rotates.
-    pub allanime_key: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
 pub struct SyncConfig {
     pub interval_hours: u64,
-    pub test_show_id: String,
+    /// Search query used by `ani-dl sync` health check.
+    pub test_query: String,
     pub test_episode: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct MinterConfig {
-    /// `none` (default), `stdio`, or `http`.
-    pub transport: String,
-    /// Subprocess command for stdio binding (default: ani-dl-minter).
-    pub command: String,
-}
-
-impl Default for MinterConfig {
-    fn default() -> Self {
-        Self {
-            transport: "none".to_string(),
-            command: "ani-dl-minter".to_string(),
-        }
-    }
-}
-
-impl MinterConfig {
-    pub fn is_enabled(&self) -> bool {
-        matches!(self.transport.as_str(), "stdio" | "http")
-    }
 }
 
 impl Default for DownloadConfig {
     fn default() -> Self {
         Self {
-            // Defaults to the current directory (matches the CLI default).
             directory: ".".to_string(),
             quality: "best".to_string(),
             concurrency: 16,
@@ -75,20 +42,11 @@ impl Default for DownloadConfig {
     }
 }
 
-impl Default for ApiConfig {
-    fn default() -> Self {
-        Self {
-            allanime_key: crate::constants::allanime_key_hex(),
-        }
-    }
-}
-
 impl Default for SyncConfig {
     fn default() -> Self {
         Self {
             interval_hours: 24,
-            // "One Piece" long-running show id used for provider health checks.
-            test_show_id: "ReooPAxPMsHM4KPMY".to_string(),
+            test_query: "cyberpunk edgerunners".to_string(),
             test_episode: "1".to_string(),
         }
     }

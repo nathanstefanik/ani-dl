@@ -1,34 +1,25 @@
-//! AllAnime GraphQL client (async, connection-pooled reqwest).
+//! anidb.app client (ani-cli v5 provider). Uses wreq Chrome TLS emulation to
+//! clear Cloudflare; plain reqwest gets 403.
 
-use std::sync::Arc;
+use std::sync::LazyLock;
+use std::time::Duration;
 
-use anyhow::{Context, Result};
-use reqwest::header::{HeaderMap, HeaderValue, ORIGIN, REFERER as H_REFERER, USER_AGENT as H_UA};
-use serde_json::json;
+use anyhow::{anyhow, Context, Result};
+use regex::Regex;
+use serde::Deserialize;
+use wreq::header::{HeaderMap, HeaderValue, USER_AGENT as H_UA};
+use wreq_util::Emulation;
 
-use crate::config::Config;
-use crate::constants::{ALLANIME_API, EPISODE_QUERY_HASH, REFERER, USER_AGENT};
-use crate::minter::{
-    self, bucket_ts, sign_aa_req, Capabilities, Material, MaterialCache, MaterialProvider,
-    PersistedContext, ALLANIME_SOURCE,
-};
-use crate::providers::{self, SourceUrl};
+use crate::constants::{ANIDB_BASE, ANIDB_REFERER, USER_AGENT};
+use crate::providers::Stream;
 
-// GraphQL documents copied verbatim from the Python `api.py`.
-const SEARCH_GQL: &str = "query( $search: SearchInput $limit: Int $page: Int \
-    $translationType: VaildTranslationTypeEnumType \
-    $countryOrigin: VaildCountryOriginEnumType ) { \
-    shows( search: $search limit: $limit page: $page \
-    translationType: $translationType countryOrigin: $countryOrigin ) { \
-    edges { _id name availableEpisodes airedStart __typename } } }";
-
-const EPISODES_LIST_GQL: &str = "query ($showId: String!) { show( _id: $showId ) \
-    { _id availableEpisodesDetail } }";
-
-const EPISODE_EMBED_GQL: &str = "query ($showId: String!, \
-    $translationType: VaildTranslationTypeEnumType!, $episodeString: String!) { \
-    episode( showId: $showId translationType: $translationType \
-    episodeString: $episodeString ) { episodeString sourceUrls } }";
+static RE_SEARCH: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"anime/([^"]+-[0-9]+)"[^>]*title="([^"]+)""#).expect("search regex")
+});
+static RE_EMBED_FILE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"file:\s*'([^']+)'").expect("embed file regex"));
+static RE_RESOLUTION: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"RESOLUTION=\d+x(\d+)").expect("resolution regex"));
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TranslationType {
@@ -37,501 +28,273 @@ pub enum TranslationType {
 }
 
 impl TranslationType {
-    pub fn as_str(&self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             TranslationType::Sub => "sub",
             TranslationType::Dub => "dub",
+        }
+    }
+
+    /// anidb language code: Japanese softsubs vs English dub.
+    fn lang_code(self) -> &'static str {
+        match self {
+            TranslationType::Sub => "jpn",
+            TranslationType::Dub => "eng",
         }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct ShowResult {
+    /// Slug id, e.g. `cyberpunk-edgerunners-1118`.
     pub id: String,
     pub name: String,
+    /// Filled after `episode_list`; search cards do not expose a count.
     pub episodes: u32,
-    pub year: u32, // airedStart.year; 0 == unknown
+    /// Not available from browse cards; always 0 for now.
+    pub year: u32,
 }
 
-pub struct AllAnimeClient {
-    pub client: reqwest::Client,
-    minter: Option<(Arc<dyn MaterialProvider>, Capabilities)>,
-    material_cache: MaterialCache,
-    /// Shared client for the current material referer (rebuilt only when the
-    /// referer changes).
-    referer_client: tokio::sync::Mutex<Option<(String, reqwest::Client)>>,
+pub struct AnidbClient {
+    pub client: wreq::Client,
 }
 
 fn default_headers() -> HeaderMap {
     let mut headers = HeaderMap::new();
     headers.insert(H_UA, HeaderValue::from_static(USER_AGENT));
-    headers.insert(H_REFERER, HeaderValue::from_static(REFERER));
-    headers.insert(ORIGIN, HeaderValue::from_static(REFERER));
     headers
 }
 
-fn headers_for(referer: &str) -> HeaderMap {
-    let mut headers = HeaderMap::new();
-    headers.insert(H_UA, HeaderValue::from_static(USER_AGENT));
-    headers.insert(
-        H_REFERER,
-        HeaderValue::from_str(referer).unwrap_or_else(|_| HeaderValue::from_static(REFERER)),
-    );
-    headers.insert(
-        ORIGIN,
-        HeaderValue::from_str(referer).unwrap_or_else(|_| HeaderValue::from_static(REFERER)),
-    );
-    headers
-}
-
-/// Client for video downloads. Unlike the API client, this must NOT set a
-/// total request timeout — reqwest's `timeout` covers the entire body read,
-/// which kills any download longer than the limit ("error decoding response
-/// body"). Downloads instead get a connect timeout and a per-read stall
-/// timeout, so a hung connection still errors out but a slow multi-minute
-/// download does not.
-pub fn download_client() -> Result<reqwest::Client> {
-    reqwest::Client::builder()
+/// Shared wreq client with Chrome TLS fingerprint. Used for both API and
+/// downloads — anidb.app (and its HLS CDN) sit behind Cloudflare.
+pub fn http_client() -> Result<wreq::Client> {
+    wreq::Client::builder()
+        .emulation(Emulation::Chrome136)
         .default_headers(default_headers())
-        .connect_timeout(std::time::Duration::from_secs(15))
-        .read_timeout(std::time::Duration::from_secs(30))
+        .connect_timeout(Duration::from_secs(15))
+        .read_timeout(Duration::from_secs(30))
+        .build()
+        .context("building wreq client")
+}
+
+/// Same fingerprint, but no whole-request timeout — HLS segment bodies can
+/// take longer than a fixed deadline on a slow link.
+pub fn download_client() -> Result<wreq::Client> {
+    wreq::Client::builder()
+        .emulation(Emulation::Chrome136)
+        .default_headers(default_headers())
+        .connect_timeout(Duration::from_secs(15))
+        .read_timeout(Duration::from_secs(60))
         .build()
         .context("building download client")
 }
 
-impl AllAnimeClient {
-    pub async fn new(cfg: &Config) -> Result<Self> {
-        let client = reqwest::Client::builder()
-            .default_headers(default_headers())
-            .timeout(std::time::Duration::from_secs(20))
-            .build()
-            .context("building reqwest client")?;
-
-        let minter = if cfg.minter.is_enabled() {
-            match minter::from_config(&cfg.minter).await {
-                Ok(pair) => Some(pair),
-                Err(e) => {
-                    eprintln!(
-                        "  ! minter init failed ({e:#}); falling back to legacy API path"
-                    );
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
+impl AnidbClient {
+    pub fn new() -> Result<Self> {
         Ok(Self {
-            client,
-            minter,
-            material_cache: MaterialCache::default(),
-            referer_client: tokio::sync::Mutex::new(None),
+            client: http_client()?,
         })
     }
 
-    /// `(api_base, client)` for GraphQL calls: minter material when cached,
-    /// otherwise the hardcoded legacy endpoint.
-    async fn api_context(&self) -> Result<(String, reqwest::Client)> {
-        if self.minter.is_some() {
-            if let Some(material) = self.material_cache.get(ALLANIME_SOURCE).await {
-                let client = self.client_for(&material.referer).await?;
-                return Ok((
-                    material.api_base.trim_end_matches('/').to_string(),
-                    client,
-                ));
-            }
-        }
-        Ok((ALLANIME_API.to_string(), self.client.clone()))
-    }
-
-    async fn client_for(&self, referer: &str) -> Result<reqwest::Client> {
-        let mut guard = self.referer_client.lock().await;
-        if let Some((cached_referer, client)) = guard.as_ref() {
-            if cached_referer == referer {
-                return Ok(client.clone());
-            }
-        }
-        let client = reqwest::Client::builder()
-            .default_headers(headers_for(referer))
-            .timeout(std::time::Duration::from_secs(20))
-            .build()
-            .context("building referer client")?;
-        *guard = Some((referer.to_string(), client.clone()));
-        Ok(client)
-    }
-
-    pub async fn search(
-        &self,
-        query: &str,
-        mode: TranslationType,
-    ) -> Result<Vec<ShowResult>> {
-        let query = query
-            .replace(['\'', '\u{2018}', '\u{2019}', '`'], " ")
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
-        let variables = json!({
-            "search": { "allowAdult": false, "allowUnknown": false, "query": query },
-            "limit": 40,
-            "page": 1,
-            "translationType": mode.as_str(),
-            "countryOrigin": "ALL",
-        });
-        let body = json!({ "variables": variables, "query": SEARCH_GQL });
-        let (api_base, client) = self.api_context().await?;
-        let resp = client
-            .post(format!("{api_base}/api"))
-            .json(&body)
+    async fn get_text(&self, url: &str) -> Result<String> {
+        self.client
+            .get(url)
             .send()
             .await
-            .context("search request failed")?;
-        let v: serde_json::Value = resp.json().await.context("search: bad JSON")?;
+            .with_context(|| format!("GET {url}"))?
+            .error_for_status()
+            .with_context(|| format!("GET {url} status"))?
+            .text()
+            .await
+            .with_context(|| format!("GET {url} body"))
+    }
+
+    pub async fn search(&self, query: &str, _mode: TranslationType) -> Result<Vec<ShowResult>> {
+        let q = query.trim().replace(' ', "+");
+        let url = format!("{ANIDB_BASE}/browse?q={q}");
+        let html = self.get_text(&url).await?;
+        if html.contains("Just a moment...") || html.contains("cf-mitigated") {
+            anyhow::bail!(
+                "blocked by Cloudflare on search; TLS fingerprint may need updating (wreq Emulation)"
+            );
+        }
 
         let mut out = Vec::new();
-        if let Some(edges) = v
-            .get("data")
-            .and_then(|d| d.get("shows"))
-            .and_then(|s| s.get("edges"))
-            .and_then(|e| e.as_array())
-        {
-            for e in edges {
-                let count = e
-                    .get("availableEpisodes")
-                    .and_then(|a| a.get(mode.as_str()))
-                    .and_then(|n| n.as_u64())
-                    .unwrap_or(0) as u32;
-                if count == 0 {
-                    continue;
-                }
-                let year = e
-                    .get("airedStart")
-                    .and_then(|a| a.get("year"))
-                    .and_then(|y| y.as_u64())
-                    .unwrap_or(0) as u32;
-                out.push(ShowResult {
-                    id: e.get("_id").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-                    name: e.get("name").and_then(|x| x.as_str()).unwrap_or("?").to_string(),
-                    episodes: count,
-                    year,
-                });
+        let mut seen = std::collections::HashSet::new();
+        for cap in RE_SEARCH.captures_iter(&html) {
+            let id = cap[1].to_string();
+            if !seen.insert(id.clone()) {
+                continue;
             }
+            out.push(ShowResult {
+                id,
+                name: html_unescape(&cap[2]),
+                episodes: 0,
+                year: 0,
+            });
         }
         Ok(out)
     }
 
-    pub async fn episode_list(
-        &self,
-        show_id: &str,
-        mode: TranslationType,
-    ) -> Result<Vec<String>> {
-        let body = json!({
-            "variables": { "showId": show_id },
-            "query": EPISODES_LIST_GQL,
+    /// Episode numbers as strings (`"1"`, `"2"`, …), sorted ascending.
+    pub async fn episode_list(&self, show_id: &str, _mode: TranslationType) -> Result<Vec<String>> {
+        let maps = self.episode_maps(show_id).await?;
+        Ok(maps.into_iter().map(|(_, num)| num).collect())
+    }
+
+    /// `(episode_id, episode_number)` pairs for a show slug.
+    async fn episode_maps(&self, show_id: &str) -> Result<Vec<(u64, String)>> {
+        let numeric = show_numeric_id(show_id)
+            .ok_or_else(|| anyhow!("invalid show id (expected slug-N): {show_id}"))?;
+        let url = format!("{ANIDB_BASE}/api/frontend/anime/{numeric}/episodes");
+        let text = self.get_text(&url).await?;
+        let parsed: EpisodesResponse =
+            serde_json::from_str(&text).context("parsing episodes JSON")?;
+        let mut maps: Vec<(u64, String)> = parsed
+            .episodes
+            .into_iter()
+            .map(|e| (e.id, e.number.to_string()))
+            .collect();
+        maps.sort_by(|a, b| {
+            ep_sort_key(&a.1)
+                .partial_cmp(&ep_sort_key(&b.1))
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
-        let (api_base, client) = self.api_context().await?;
-        let resp = client
-            .post(format!("{api_base}/api"))
-            .json(&body)
-            .send()
-            .await
-            .context("episode_list request failed")?;
-        let v: serde_json::Value = resp.json().await.context("episode_list: bad JSON")?;
-
-        let mut eps: Vec<String> = v
-            .get("data")
-            .and_then(|d| d.get("show"))
-            .and_then(|s| s.get("availableEpisodesDetail"))
-            .and_then(|d| d.get(mode.as_str()))
-            .and_then(|a| a.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|x| x.as_str().map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or_default();
-        eps.sort_by(|a, b| {
-            let fa: f64 = a.parse().unwrap_or(0.0);
-            let fb: f64 = b.parse().unwrap_or(0.0);
-            fa.partial_cmp(&fb).unwrap_or(std::cmp::Ordering::Equal)
-        });
-        Ok(eps)
+        Ok(maps)
     }
 
-    pub async fn episode_sources(
+    /// Resolve playable HLS variants for one episode.
+    pub async fn episode_streams(
         &self,
         show_id: &str,
         ep: &str,
         mode: TranslationType,
-    ) -> Result<Vec<SourceUrl>> {
-        // Primary path: ani-cli's current recipe — a persisted-query GET carrying
-        // the youtu-chan referer/origin and NO aaReq. AllAnime leaves this path
-        // open and still encrypts the reply with the static `tobeparsed` key, so
-        // it needs neither the browser-gated crypto bootstrap nor the minter.
-        match self.episode_sources_direct(show_id, ep, mode).await {
-            Ok(sources) if !sources.is_empty() => return Ok(sources),
-            Ok(_) => {}
-            Err(e) => eprintln!("  ! direct API path failed: {e:#}"),
+    ) -> Result<Vec<Stream>> {
+        let maps = self.episode_maps(show_id).await?;
+        let ep_id = maps
+            .iter()
+            .find(|(_, num)| num == ep)
+            .map(|(id, _)| *id)
+            .ok_or_else(|| anyhow!("episode {ep} not in list for {show_id}"))?;
+
+        let url = format!("{ANIDB_BASE}/api/frontend/episode/{ep_id}/languages");
+        let text = self.get_text(&url).await?;
+        let parsed: LanguagesResponse =
+            serde_json::from_str(&text).context("parsing languages JSON")?;
+
+        let want = mode.lang_code();
+        let embed = parsed
+            .languages
+            .iter()
+            .find(|l| l.code == want)
+            .or_else(|| parsed.languages.first())
+            .map(|l| l.embed_url.replace("\\/", "/"))
+            .ok_or_else(|| anyhow!("no language embeds for episode {ep}"))?;
+
+        if !parsed.languages.iter().any(|l| l.code == want) {
+            eprintln!(
+                "  ! {} not available, using {}",
+                mode.as_str(),
+                parsed.languages[0].code
+            );
         }
 
-        // Fallback: the aaReq minter path, only when one is configured. Kept for
-        // the day AllAnime closes the direct path again; harmless otherwise.
-        if let Some((minter, caps)) = &self.minter {
-            return self
-                .episode_sources_minter(minter.as_ref(), caps, show_id, ep, mode)
-                .await;
-        }
+        let embed_html = self.get_text(&embed).await?;
+        let master = RE_EMBED_FILE
+            .captures(&embed_html)
+            .map(|c| c[1].to_string())
+            .ok_or_else(|| anyhow!("no m3u8 file: in embed page"))?;
 
-        Ok(Vec::new())
+        self.expand_master(&master).await
     }
 
-    async fn episode_sources_minter(
-        &self,
-        minter: &dyn MaterialProvider,
-        caps: &Capabilities,
-        show_id: &str,
-        ep: &str,
-        mode: TranslationType,
-    ) -> Result<Vec<SourceUrl>> {
-        if caps.supports_level(0) {
-            match self
-                .episode_sources_level0(minter, show_id, ep, mode, false)
-                .await
-            {
-                Ok(sources) if !sources.is_empty() => return Ok(sources),
-                Ok(_) => {}
-                Err(e) if is_crypto_rejection(&format!("{e:#}")) => {}
-                Err(e) => return Err(e),
+    async fn expand_master(&self, master_url: &str) -> Result<Vec<Stream>> {
+        let text = self.get_text(master_url).await?;
+        if !text.contains("EXTM3U") {
+            anyhow::bail!("master playlist is not m3u8");
+        }
+        let lines: Vec<&str> = text.lines().collect();
+        let mut streams = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            if !line.starts_with("#EXT-X-STREAM-INF") || line.contains("EXT-X-I-FRAME") {
+                continue;
             }
-
-            self.material_cache.invalidate(ALLANIME_SOURCE).await;
-            if let Ok(sources) = self
-                .episode_sources_level0(minter, show_id, ep, mode, true)
-                .await
-            {
-                if !sources.is_empty() {
-                    return Ok(sources);
-                }
+            let height = RE_RESOLUTION
+                .captures(line)
+                .and_then(|c| c[1].parse().ok())
+                .unwrap_or(0);
+            let Some(variant) = lines.get(i + 1).map(|l| l.trim()) else {
+                continue;
+            };
+            if variant.is_empty() || variant.starts_with('#') {
+                continue;
             }
-        }
-
-        if caps.supports_level(1) {
-            if let Ok(sources) = self
-                .episode_sources_level1(minter, show_id, ep, mode)
-                .await
-            {
-                if !sources.is_empty() {
-                    return Ok(sources);
-                }
-            }
-        }
-
-        if caps.supports_level(2) {
-            return minter.resolve(ALLANIME_SOURCE, show_id, ep, mode).await;
-        }
-
-        // The direct path already ran (and failed) before we got here, so there
-        // is nothing left to try.
-        eprintln!("  ! minter enabled but all levels failed");
-        Ok(Vec::new())
-    }
-
-    async fn episode_sources_level0(
-        &self,
-        minter: &dyn MaterialProvider,
-        show_id: &str,
-        ep: &str,
-        mode: TranslationType,
-        force: bool,
-    ) -> Result<Vec<SourceUrl>> {
-        let material = self.get_material(minter, force).await?;
-        let ts = bucket_ts(chrono::Utc::now().timestamp_millis());
-        let aa_req = sign_aa_req(
-            &material.part_b,
-            &material.mask,
-            material.epoch,
-            &material.build_id,
-            EPISODE_QUERY_HASH,
-            ts,
-        )?;
-        let text = self
-            .fetch_episode_with_aa_req(&material, show_id, ep, mode, &aa_req)
-            .await?;
-        if is_crypto_rejection(&text) {
-            self.material_cache.invalidate(ALLANIME_SOURCE).await;
-            anyhow::bail!("AA_CRYPTO rejection");
-        }
-        Ok(providers::parse_source_urls(&text))
-    }
-
-    async fn episode_sources_level1(
-        &self,
-        minter: &dyn MaterialProvider,
-        show_id: &str,
-        ep: &str,
-        mode: TranslationType,
-    ) -> Result<Vec<SourceUrl>> {
-        let ts = bucket_ts(chrono::Utc::now().timestamp_millis());
-        let token = minter
-            .sign(ALLANIME_SOURCE, EPISODE_QUERY_HASH, Some(ts))
-            .await?;
-        let material = self.get_material(minter, false).await?;
-        let text = self
-            .fetch_episode_with_aa_req(&material, show_id, ep, mode, &token.aa_req)
-            .await?;
-        if is_crypto_rejection(&text) {
-            self.material_cache.invalidate(ALLANIME_SOURCE).await;
-            anyhow::bail!("AA_CRYPTO rejection");
-        }
-        Ok(providers::parse_source_urls(&text))
-    }
-
-    async fn get_material(
-        &self,
-        minter: &dyn MaterialProvider,
-        force: bool,
-    ) -> Result<Material> {
-        if !force {
-            if let Some(cached) = self.material_cache.get(ALLANIME_SOURCE).await {
-                return Ok(cached);
-            }
-        }
-        match minter.material(ALLANIME_SOURCE, force).await {
-            Ok(material) => {
-                self.record_material(&material)?;
-                self.material_cache
-                    .set(ALLANIME_SOURCE, material.clone())
-                    .await;
-                Ok(material)
-            }
-            Err(e) if !force => {
-                if let Some(cached) = self.material_cache.get(ALLANIME_SOURCE).await {
-                    return Ok(cached);
-                }
-                if minter::load_persisted_context(ALLANIME_SOURCE).is_some() {
-                    eprintln!(
-                        "  ! minter unavailable; stale material context on disk but rotating secrets expired"
-                    );
-                }
-                Err(e)
-            }
-            Err(e) => Err(e),
-        }
-    }
-
-    fn record_material(&self, material: &Material) -> Result<()> {
-        let ctx = PersistedContext {
-            mask: material.mask.clone(),
-            build_id: material.build_id.clone(),
-            referer: material.referer.clone(),
-            api_base: material.api_base.clone(),
-            cdn_base: material.cdn_base.clone(),
-            updated_at: chrono::Utc::now().to_rfc3339(),
-        };
-        minter::save_persisted_context(ALLANIME_SOURCE, &ctx)
-    }
-
-    async fn fetch_episode_with_aa_req(
-        &self,
-        material: &Material,
-        show_id: &str,
-        ep: &str,
-        mode: TranslationType,
-        aa_req: &str,
-    ) -> Result<String> {
-        let variables = json!({
-            "showId": show_id,
-            "translationType": mode.as_str(),
-            "episodeString": ep,
-        });
-        let extensions = json!({
-            "persistedQuery": { "version": 1, "sha256Hash": EPISODE_QUERY_HASH },
-            "aaReq": aa_req,
-        });
-
-        let client = self.client_for(&material.referer).await?;
-
-        let body = json!({ "variables": variables, "extensions": extensions });
-        let resp = client
-            .post(format!("{}/api", material.api_base.trim_end_matches('/')))
-            .json(&body)
-            .send()
-            .await
-            .context("episode_sources POST (aaReq) failed")?;
-        let mut text = resp.text().await.context("episode_sources: reading body")?;
-
-        if !text.contains("tobeparsed") && !text.contains("sourceUrl") {
-            let body = json!({
-                "variables": variables,
-                "extensions": extensions,
-                "query": EPISODE_EMBED_GQL,
+            let url = if variant.starts_with("http") {
+                variant.to_string()
+            } else {
+                let base = master_url.rsplit_once('/').map(|(b, _)| b).unwrap_or("");
+                format!("{base}/{variant}")
+            };
+            streams.push(Stream {
+                height,
+                url,
+                referer: ANIDB_REFERER.to_string(),
+                provider: "anidb".to_string(),
             });
-            let resp = client
-                .post(format!("{}/api", material.api_base.trim_end_matches('/')))
-                .json(&body)
-                .send()
-                .await
-                .context("episode_sources POST (full query) failed")?;
-            text = resp
-                .text()
-                .await
-                .context("episode_sources: reading POST body")?;
         }
-        Ok(text)
-    }
-
-    /// The no-aaReq persisted-query GET path (ani-cli's current recipe). This is
-    /// now the primary resolver; the minter is only a fallback.
-    async fn episode_sources_direct(
-        &self,
-        show_id: &str,
-        ep: &str,
-        mode: TranslationType,
-    ) -> Result<Vec<SourceUrl>> {
-        let variables = json!({
-            "showId": show_id,
-            "translationType": mode.as_str(),
-            "episodeString": ep,
-        });
-        let extensions = json!({
-            "persistedQuery": { "version": 1, "sha256Hash": EPISODE_QUERY_HASH }
-        });
-
-        // Pin to the hardcoded endpoint + youtu-chan header client. This path is
-        // the verified recipe and must not inherit minter material, which may
-        // carry a different referer/api_base.
-        let api_base = ALLANIME_API.to_string();
-        let client = self.client.clone();
-        let mut text = String::new();
-        if let Ok(resp) = client
-            .get(format!("{api_base}/api"))
-            .query(&[
-                ("variables", variables.to_string()),
-                ("extensions", extensions.to_string()),
-            ])
-            .send()
-            .await
-        {
-            text = resp.text().await.unwrap_or_default();
+        if streams.is_empty() {
+            // Master may already be a media playlist — treat as single unknown quality.
+            streams.push(Stream {
+                height: 0,
+                url: master_url.to_string(),
+                referer: ANIDB_REFERER.to_string(),
+                provider: "anidb".to_string(),
+            });
         }
-
-        if !text.contains("tobeparsed") && !text.contains("sourceUrl") {
-            let body = json!({ "variables": variables, "query": EPISODE_EMBED_GQL });
-            let resp = client
-                .post(format!("{api_base}/api"))
-                .json(&body)
-                .send()
-                .await
-                .context("episode_sources POST failed")?;
-            text = resp
-                .text()
-                .await
-                .context("episode_sources: reading POST body")?;
-        }
-
-        Ok(providers::parse_source_urls(&text))
+        Ok(streams)
     }
 }
 
-fn is_crypto_rejection(text: &str) -> bool {
-    text.contains("AA_CRYPTO")
+fn show_numeric_id(show_id: &str) -> Option<&str> {
+    let tail = show_id.rsplit('-').next()?;
+    if tail.chars().all(|c| c.is_ascii_digit()) {
+        Some(tail)
+    } else {
+        None
+    }
+}
+
+fn ep_sort_key(ep: &str) -> f64 {
+    ep.parse().unwrap_or(f64::MAX)
+}
+
+fn html_unescape(s: &str) -> String {
+    s.replace("&#039;", "'")
+        .replace("&#39;", "'")
+        .replace("&amp;", "&")
+        .replace("&quot;", "\"")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+}
+
+#[derive(Debug, Deserialize)]
+struct EpisodesResponse {
+    episodes: Vec<EpisodeEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EpisodeEntry {
+    id: u64,
+    number: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct LanguagesResponse {
+    languages: Vec<LanguageEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LanguageEntry {
+    code: String,
+    embed_url: String,
 }

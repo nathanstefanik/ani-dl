@@ -6,7 +6,7 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "ani-dl",
     version,
-    about = "Download anime via the AllAnime API (no playback)."
+    about = "Download anime via anidb.app (ani-cli v5 provider, no playback)."
 )]
 pub struct Cli {
     /// Search term. If omitted (and a TUI is used) you'll be prompted.
@@ -40,7 +40,7 @@ pub struct Cli {
     #[arg(short = 'c', long)]
     pub concurrency: Option<usize>,
 
-    /// Print resolved provider URLs and exit (debug).
+    /// Print resolved stream URLs and exit (debug).
     #[arg(long = "list-providers")]
     pub list_providers: bool,
 
@@ -58,7 +58,7 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
-    /// Run provider sync + health check.
+    /// Run provider health check.
     Sync {
         /// Run detached as a daily background daemon.
         #[arg(long)]
@@ -75,7 +75,7 @@ pub enum Command {
         concurrency: usize,
         #[arg(short = 'q', long, default_value = "best")]
         quality: String,
-        #[arg(long, default_value = "https://youtu-chan.com")]
+        #[arg(long, default_value = "https://anidb.app/")]
         referer: String,
     },
 }

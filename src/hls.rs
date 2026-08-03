@@ -15,14 +15,14 @@ use tokio::io::AsyncWriteExt;
 type Aes128CbcDec = cbc::Decryptor<aes::Aes128>;
 
 pub struct HlsDownloader {
-    pub client: reqwest::Client,
+    pub client: wreq::Client,
     pub concurrency: usize,
     pub referer: String,
     pub retries: u32,
 }
 
 impl HlsDownloader {
-    pub fn new(client: reqwest::Client, concurrency: usize, referer: String, retries: u32) -> Self {
+    pub fn new(client: wreq::Client, concurrency: usize, referer: String, retries: u32) -> Self {
         Self {
             client,
             concurrency,
@@ -359,7 +359,7 @@ fn maybe_decrypt(
 }
 
 async fn download_segment(
-    client: &reqwest::Client,
+    client: &wreq::Client,
     url: &str,
     referer: &str,
     retries: u32,

@@ -5,7 +5,6 @@ mod cli;
 mod config;
 mod constants;
 mod hls;
-mod minter;
 mod providers;
 mod sync;
 mod tui;
@@ -17,29 +16,26 @@ use anyhow::Result;
 use clap::Parser;
 use regex::Regex;
 
-use api::{AllAnimeClient, ShowResult, TranslationType};
+use api::{AnidbClient, ShowResult, TranslationType};
 use cli::{Cli, Command};
 use config::Config;
 use hls::HlsDownloader;
-use providers::{resolve_all, select_quality};
+use providers::select_quality;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let mut cfg = Config::load().unwrap_or_else(|e| {
+    let cfg = Config::load().unwrap_or_else(|e| {
         eprintln!("config error: {e:#} — using defaults");
         Config::default()
     });
-    if !cfg.api.allanime_key.is_empty() {
-        constants::set_active_key(cfg.api.allanime_key.clone());
-    }
 
     match &cli.command {
         Some(Command::Sync { daemon }) => {
             if *daemon {
                 sync::run_daemon(cfg).await
             } else {
-                sync::run_once(&mut cfg, true).await
+                sync::run_once(&cfg, true).await
             }
         }
         Some(Command::Config) => {
@@ -82,7 +78,7 @@ async fn run_download(cli: &Cli, cfg: &Config) -> Result<()> {
             .unwrap_or_else(|| cfg.download.directory.clone()),
     );
 
-    let api = AllAnimeClient::new(cfg).await?;
+    let api = AnidbClient::new()?;
 
     // Determine query.
     let query = match &cli.query {
@@ -128,16 +124,17 @@ async fn run_download(cli: &Cli, cfg: &Config) -> Result<()> {
         }
         None => show.name.clone(),
     };
-    eprintln!(
-        "Selected: {} ({} eps, season {season})",
-        show.name, show.episodes
-    );
 
     // Episode list.
     let available = api.episode_list(&show.id, mode).await?;
     if available.is_empty() {
-        anyhow::bail!("no episodes available for this translation type");
+        anyhow::bail!("no episodes available");
     }
+    eprintln!(
+        "Selected: {} ({} eps, season {season})",
+        show.name,
+        available.len()
+    );
 
     // Select episodes.
     let episodes = pick_episodes(&available, cli)?;
@@ -153,25 +150,14 @@ async fn run_download(cli: &Cli, cfg: &Config) -> Result<()> {
     let total = episodes.len();
     for (i, ep) in episodes.iter().enumerate() {
         eprintln!("\n=== Episode {ep} ({}/{total}) ===", i + 1);
-        // Keep the loop failure-tolerant: one bad episode must not abort the batch.
-        let sources = match api.episode_sources(&show.id, ep, mode).await {
+        let streams = match api.episode_streams(&show.id, ep, mode).await {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("  ! failed to fetch sources for episode {ep}: {e:#}");
+                eprintln!("  ! failed to resolve episode {ep}: {e:#}");
                 failures += 1;
                 continue;
             }
         };
-        let names: Vec<&str> = sources.iter().map(|s| s.source_name.as_str()).collect();
-        eprintln!(
-            "  providers: {}",
-            if names.is_empty() {
-                "(none)".to_string()
-            } else {
-                names.join(", ")
-            }
-        );
-        let streams = resolve_all(&api.client, &sources).await;
         eprintln!(
             "  resolved {} stream(s): {}",
             streams.len(),
@@ -244,8 +230,6 @@ async fn run_download(cli: &Cli, cfg: &Config) -> Result<()> {
                 );
             }
             Err(e) => {
-                // {:#} prints the whole anyhow chain — the top-level reqwest
-                // message alone ("error decoding response body") hides the cause.
                 eprintln!("  ! download failed for episode {ep}: {e:#}");
                 failures += 1;
             }
@@ -296,7 +280,12 @@ fn pick_show(results: &[ShowResult], cli: &Cli) -> Result<Option<ShowResult>> {
             } else {
                 String::new()
             };
-            println!("{}\t{} ({} episodes){year}", i + 1, s.name, s.episodes);
+            let eps = if s.episodes > 0 {
+                format!(" ({} episodes)", s.episodes)
+            } else {
+                String::new()
+            };
+            println!("{}\t{}{eps}{year}", i + 1, s.name);
         }
         anyhow::bail!("--no-tui: re-run with -n <N> to pick a result");
     }
@@ -313,7 +302,7 @@ static RE_ORDINAL_SEASON: LazyLock<Regex> =
 async fn infer_season(
     show: &ShowResult,
     search_results: &[ShowResult],
-    api: &AllAnimeClient,
+    api: &AnidbClient,
     mode: TranslationType,
 ) -> Option<u32> {
     if let Some(n) = explicit_season_in_title(&show.name) {
