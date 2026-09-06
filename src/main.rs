@@ -417,7 +417,7 @@ fn pick_episodes(available: &[String], cli: &Cli) -> Result<Vec<String>> {
 
 /// Expand "1", "1-12", "1 2 5", "1,3,5" against the available episode list.
 ///
-/// Range bounds follow ani-cli 5.0.3: `0` as the start means the first
+/// Range bounds follow ani-cli 5.0.4: `0` as the start means the first
 /// available episode and `-1` means the last, so "0--1" is the whole show and
 /// "12--1" is episode 12 onwards. `-1` on its own is the latest episode.
 fn parse_episode_arg(arg: &str, available: &[String]) -> Vec<String> {

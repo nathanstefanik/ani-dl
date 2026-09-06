@@ -81,16 +81,10 @@ select/deselect all, `Enter` to confirm.
 
 ## Versioning
 
-ani-dl carries its own [semantic version](https://semver.org), describing this
-CLI's own options and behaviour. That is deliberately separate from the ani-cli
-release whose scraping it mirrors: upstream changes how the provider is scraped
-on its own schedule, and that shows up as the **ani-cli parity** line rather
-than as an ani-dl version bump.
-
-```sh
-ani-dl -V           # ani-dl 1.0.0 (a1b2c3d45)
-ani-dl --version    # + commit, target triple, ani-cli parity, provider
-```
+ani-dl's own semver is independent of the ani-cli release whose scraping it
+mirrors. `-V` prints the number and commit; `--version` also shows the target
+triple, **ani-cli parity**, and provider. `ani-dl sync` stamps both version
+numbers into `provider_health.json`.
 
 ```
 ani-dl 1.0.0
@@ -99,13 +93,6 @@ target:         aarch64-apple-darwin
 ani-cli parity: 5.0.4
 provider:       https://anidb.app
 ```
-
-The commit is embedded at build time by `build.rs`, with a `-dirty` suffix when
-the working tree had uncommitted changes. Building outside a git checkout (from
-a release tarball) reports `unknown` and is otherwise unaffected — git is a
-convenience, never a build requirement. `ani-dl sync` stamps the same two
-version numbers into `provider_health.json`, so a stale health file is easy to
-spot.
 
 ## How it works
 

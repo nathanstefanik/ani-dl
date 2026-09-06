@@ -1,14 +1,10 @@
-//! Captures build-time provenance so `ani-dl --version` can describe the
-//! binary it is running from, not just the number in Cargo.toml.
-
 use std::path::Path;
 use std::process::Command;
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    // Rebuild when HEAD moves, so the embedded commit stays truthful. Asking
-    // git for the path keeps this working inside worktrees, where `.git` is a
-    // file rather than a directory.
+    // Worktrees store `.git` as a file; ask git for the real path so HEAD
+    // moves still trigger a rebuild of the embedded commit.
     for name in ["HEAD", "index"] {
         if let Some(path) = git(&["rev-parse", "--git-path", name])
             && Path::new(&path).exists()
@@ -17,15 +13,13 @@ fn main() {
         }
     }
 
-    let sha = git_describe().unwrap_or_else(|| "unknown".to_string());
+    let sha = git_sha().unwrap_or_else(|| "unknown".to_string());
     let target = std::env::var("TARGET").unwrap_or_else(|_| "unknown".to_string());
     println!("cargo:rustc-env=ANI_DL_GIT_SHA={sha}");
     println!("cargo:rustc-env=ANI_DL_TARGET={target}");
 }
 
-/// Short commit, suffixed `-dirty` when the tree has uncommitted changes.
-/// `None` outside a git checkout — release tarballs build fine without it.
-fn git_describe() -> Option<String> {
+fn git_sha() -> Option<String> {
     let sha = git(&["rev-parse", "--short=9", "HEAD"])?;
     let dirty = git(&["status", "--porcelain", "--untracked-files=no"])
         .is_some_and(|s| !s.trim().is_empty());
