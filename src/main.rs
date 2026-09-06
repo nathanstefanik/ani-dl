@@ -8,6 +8,7 @@ mod hls;
 mod providers;
 mod sync;
 mod tui;
+mod version;
 
 use std::path::PathBuf;
 use std::sync::LazyLock;

@@ -5,7 +5,9 @@ use clap::{Parser, Subcommand};
 #[derive(Parser, Debug)]
 #[command(
     name = "ani-dl",
-    version,
+    // `-V` gives the one-liner, `--version` the full build provenance.
+    version = crate::version::short(),
+    long_version = crate::version::long(),
     about = "Download anime via anidb.app (ani-cli v5 provider, no playback)."
 )]
 pub struct Cli {

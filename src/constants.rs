@@ -1,4 +1,5 @@
-//! Shared constants for the anidb.app backend (tracks ani-cli 5.0.4).
+//! Shared constants for the anidb.app backend. The ani-cli release these
+//! paths track is recorded as `version::ANI_CLI_PARITY`.
 
 pub const ANIDB_BASE: &str = "https://anidb.app";
 pub const ANIDB_REFERER: &str = "https://anidb.app/";
