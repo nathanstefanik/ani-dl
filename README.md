@@ -40,7 +40,7 @@ Commands:
 Options:
   -d, --download-dir <PATH>   Save directory (default: current directory)
   -q, --quality <QUALITY>     best | worst | 1080 | 720 | 480 [default: best]
-  -e, --episodes <RANGE>      "1", "1-12", "1 2 5" (bypasses the TUI)
+  -e, --episodes <RANGE>      "1", "1-12", "1 2 5"; 0 = first, -1 = last
   -D, --dubbed                Use the dubbed version
   -s, --season <N>            Season number for the SxxExx filename tag [default: 1]
   -n, --number <N>            Auto-select the nth search result (skips the TUI)
@@ -61,6 +61,10 @@ ani-dl "attack on titan" -e 1-10 -d ~/anime -n 1
 
 # Dubbed
 ani-dl -D "one piece" -n 1 -e 1
+
+# Whole show (0 = first available episode, -1 = last); "-1" alone is the latest
+ani-dl "frieren" -n 1 -e 0--1
+ani-dl "frieren" -n 1 -e -1
 
 # Season/episode naming: writes Tongari.Boushi.no.Atelier.S01E13.mp4
 ani-dl "Tongari Boushi no Atelier" -n 1 -s 1 -e 13
@@ -87,8 +91,9 @@ query → browse scrape → pick show → episode JSON → pick episodes
           → {Title}.S{NN}E{NN}.mp4
 ```
 
-Provider: [anidb.app](https://anidb.app), matching ani-cli v5. Sub uses the
-`jpn` language embed; `--dubbed` uses `eng`.
+Provider: [anidb.app](https://anidb.app), matching ani-cli v5 — the scraping
+paths track **ani-cli 5.0.4**. Sub uses the `jpn` language embed; `--dubbed`
+uses `eng`.
 
 ## `ani-dl sync` — health check
 

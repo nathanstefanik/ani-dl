@@ -13,9 +13,12 @@ use wreq_util::Emulation;
 use crate::constants::{ANIDB_BASE, ANIDB_REFERER, USER_AGENT};
 use crate::providers::Stream;
 
-static RE_SEARCH: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"anime/([^"]+-[0-9]+)"[^>]*title="([^"]+)""#).expect("search regex")
-});
+static RE_SHOW_ID: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"anime/([^"/]+-[0-9]+)""#).expect("show id regex"));
+static RE_TITLE_ATTR: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"title="([^"]+)""#).expect("title attr regex"));
+static RE_ALT_ATTR: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"alt="([^"]+)""#).expect("alt attr regex"));
 static RE_EMBED_FILE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"file:\s*'([^']+)'").expect("embed file regex"));
 static RE_RESOLUTION: LazyLock<Regex> =
@@ -96,44 +99,49 @@ impl AnidbClient {
         })
     }
 
+    /// GET with ani-cli 5.0.4 `anidb_curl` semantics: a transport failure, a
+    /// non-2xx status, a Cloudflare interstitial and an empty body are four
+    /// distinct errors, each named in the message.
     async fn get_text(&self, url: &str) -> Result<String> {
-        self.client
+        let resp = self
+            .client
             .get(url)
             .send()
             .await
-            .with_context(|| format!("GET {url}"))?
-            .error_for_status()
-            .with_context(|| format!("GET {url} status"))?
+            .map_err(|e| anyhow!("Connection error: could not fetch {url} ({e})"))?;
+        let status = resp.status();
+        let body = resp
             .text()
             .await
-            .with_context(|| format!("GET {url} body"))
+            .map_err(|e| anyhow!("Connection error: could not read {url} ({e})"))?;
+
+        // Cloudflare answers the challenge with its own status code; name the
+        // challenge rather than the code, as ani-cli does.
+        if is_cloudflare_challenge(&body) {
+            anyhow::bail!(
+                "Blocked by Cloudflare on {url}; TLS fingerprint may need updating (wreq Emulation)"
+            );
+        }
+        if !status.is_success() {
+            let hint = if status.as_u16() == 503 {
+                " (anidb.app may be under maintenance)"
+            } else {
+                ""
+            };
+            anyhow::bail!("Request failed: HTTP {} from {url}{hint}", status.as_u16());
+        }
+        if body.trim().is_empty() {
+            anyhow::bail!("Connection error: no response from {ANIDB_BASE} ({url})");
+        }
+        Ok(body)
     }
 
     pub async fn search(&self, query: &str, _mode: TranslationType) -> Result<Vec<ShowResult>> {
         let q = query.trim().replace(' ', "+");
         let url = format!("{ANIDB_BASE}/browse?q={q}");
         let html = self.get_text(&url).await?;
-        if html.contains("Just a moment...") || html.contains("cf-mitigated") {
-            anyhow::bail!(
-                "blocked by Cloudflare on search; TLS fingerprint may need updating (wreq Emulation)"
-            );
-        }
 
-        let mut out = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        for cap in RE_SEARCH.captures_iter(&html) {
-            let id = cap[1].to_string();
-            if !seen.insert(id.clone()) {
-                continue;
-            }
-            out.push(ShowResult {
-                id,
-                name: html_unescape(&cap[2]),
-                episodes: 0,
-                year: 0,
-            });
-        }
-        Ok(out)
+        Ok(parse_search_results(&html))
     }
 
     /// Episode numbers as strings (`"1"`, `"2"`, …), sorted ascending.
@@ -255,6 +263,44 @@ impl AnidbClient {
     }
 }
 
+/// Pull `(slug, title)` pairs out of a browse page. Split on `<a href` first,
+/// as ani-cli does, so the title is read from the same card as the link — the
+/// card exposes it as `title=` on the anchor or `alt=` on the poster `img`.
+fn parse_search_results(html: &str) -> Vec<ShowResult> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for card in html.split("<a href") {
+        let Some(id_match) = RE_SHOW_ID.captures(card) else {
+            continue;
+        };
+        let id = id_match[1].to_string();
+        // Only look past the link itself, so a neighbouring card's attributes
+        // cannot be picked up as this show's title.
+        let rest = &card[id_match.get(0).map_or(0, |m| m.end())..];
+        let Some(name) = RE_TITLE_ATTR
+            .captures(rest)
+            .or_else(|| RE_ALT_ATTR.captures(rest))
+            .map(|c| html_unescape(&c[1]))
+        else {
+            continue;
+        };
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        out.push(ShowResult {
+            id,
+            name,
+            episodes: 0,
+            year: 0,
+        });
+    }
+    out
+}
+
+fn is_cloudflare_challenge(body: &str) -> bool {
+    body.contains("Just a moment") || body.contains("cf-mitigated")
+}
+
 fn show_numeric_id(show_id: &str) -> Option<&str> {
     let tail = show_id.rsplit('-').next()?;
     if tail.chars().all(|c| c.is_ascii_digit()) {
@@ -297,4 +343,54 @@ struct LanguagesResponse {
 struct LanguageEntry {
     code: String,
     embed_url: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn search_reads_title_attribute() {
+        let html = r#"<div><a href="/anime/sousou-no-frieren-1234" title="Sousou no Frieren">
+            <img src="/p.jpg" alt="poster"></a></div>"#;
+        let out = parse_search_results(html);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].id, "sousou-no-frieren-1234");
+        assert_eq!(out[0].name, "Sousou no Frieren");
+    }
+
+    #[test]
+    fn search_falls_back_to_img_alt() {
+        // ani-cli 5.x reads alt=; keep working if the anchor drops title=.
+        let html = r#"<a href="/anime/fruits-basket-99" class="card">
+            <img src="/p.jpg" alt="Fruits Basket &amp; Friends"></a>"#;
+        let out = parse_search_results(html);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].name, "Fruits Basket & Friends");
+    }
+
+    #[test]
+    fn search_dedupes_and_ignores_non_show_links() {
+        let html = r#"<a href="/browse?q=x" title="Browse"></a>
+            <a href="/anime/bocchi-the-rock-7" title="Bocchi the Rock!"></a>
+            <a href="/anime/bocchi-the-rock-7" title="Bocchi the Rock!"></a>"#;
+        let out = parse_search_results(html);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].id, "bocchi-the-rock-7");
+    }
+
+    #[test]
+    fn title_is_not_borrowed_from_the_previous_card() {
+        // The title attribute sits before the href here, so this card has no
+        // name of its own and must be skipped rather than stealing one.
+        let html = r#"<a title="Wrong Show" href="/anime/right-show-1"></a>"#;
+        assert!(parse_search_results(html).is_empty());
+    }
+
+    #[test]
+    fn cloudflare_challenge_is_recognised() {
+        assert!(is_cloudflare_challenge("<title>Just a moment...</title>"));
+        assert!(is_cloudflare_challenge("cf-mitigated: challenge"));
+        assert!(!is_cloudflare_challenge("<html>Under Maintenance</html>"));
+    }
 }
