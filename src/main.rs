@@ -8,6 +8,7 @@ mod hls;
 mod providers;
 mod sync;
 mod tui;
+mod version;
 
 use std::path::PathBuf;
 use std::sync::LazyLock;
@@ -415,6 +416,10 @@ fn pick_episodes(available: &[String], cli: &Cli) -> Result<Vec<String>> {
 }
 
 /// Expand "1", "1-12", "1 2 5", "1,3,5" against the available episode list.
+///
+/// Range bounds follow ani-cli 5.0.4: `0` as the start means the first
+/// available episode and `-1` means the last, so "0--1" is the whole show and
+/// "12--1" is episode 12 onwards. `-1` on its own is the latest episode.
 fn parse_episode_arg(arg: &str, available: &[String]) -> Vec<String> {
     let avail: std::collections::HashSet<&str> = available.iter().map(|s| s.as_str()).collect();
     let mut picked: Vec<String> = Vec::new();
@@ -423,18 +428,28 @@ fn parse_episode_arg(arg: &str, available: &[String]) -> Vec<String> {
         if token.is_empty() {
             continue;
         }
-        if let Some((lo, hi)) = token.split_once('-') {
-            if let (Ok(lo), Ok(hi)) = (lo.parse::<u32>(), hi.parse::<u32>()) {
-                // Walk the available list rather than lo..=hi, so a typo like
-                // "1-9999999" cannot expand into millions of strings.
-                picked.extend(
-                    available
-                        .iter()
-                        .filter(|ep| ep.parse::<u32>().is_ok_and(|n| (lo..=hi).contains(&n)))
-                        .cloned(),
-                );
-                continue;
+        if token == "-1" {
+            picked.extend(available.last().cloned());
+            continue;
+        }
+        if let Some((lo_raw, hi_raw)) = split_range(token)
+            && let (Some(lo), Some(hi)) = (
+                range_bound(lo_raw, available, Bound::Start),
+                range_bound(hi_raw, available, Bound::End),
+            )
+        {
+            // Walk the available list rather than lo..=hi, so a typo like
+            // "1-9999999" cannot expand into millions of strings.
+            let matched: Vec<String> = available
+                .iter()
+                .filter(|ep| ep.parse::<f64>().is_ok_and(|n| n >= lo && n <= hi))
+                .cloned()
+                .collect();
+            if matched.is_empty() {
+                eprintln!("  ! range {token} matches no available episode, skipping");
             }
+            picked.extend(matched);
+            continue;
         }
         picked.push(token.to_string());
     }
@@ -449,6 +464,30 @@ fn parse_episode_arg(arg: &str, available: &[String]) -> Vec<String> {
         }
     }
     result
+}
+
+/// Split "1-12" / "12--1" into its two bounds. The separator is the first `-`
+/// after position 0, so a leading "-1" stays intact as a bound of its own.
+fn split_range(token: &str) -> Option<(&str, &str)> {
+    let after_first = token.chars().next()?.len_utf8();
+    let sep = token[after_first..].find('-')? + after_first;
+    Some((&token[..sep], &token[sep + 1..]))
+}
+
+enum Bound {
+    Start,
+    End,
+}
+
+/// Resolve one range bound to a number: `0` is the first available episode,
+/// `-1` the last, anything else is parsed as written.
+fn range_bound(raw: &str, available: &[String], side: Bound) -> Option<f64> {
+    let edge = |ep: Option<&String>| ep.and_then(|e| e.parse::<f64>().ok());
+    match raw {
+        "-1" => edge(available.last()),
+        "0" if matches!(side, Bound::Start) => edge(available.first()),
+        other => other.parse::<f64>().ok(),
+    }
 }
 
 static RE_UNSAFE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[^\w\s-]").unwrap());
@@ -564,6 +603,38 @@ mod tests {
             build_filename(&base, 2, "1"),
             "Kaguya-sama.wa.Kokurasetai.S02E01"
         );
+    }
+
+    #[test]
+    fn range_bounds_follow_ani_cli() {
+        let eps: Vec<String> = ["2", "3", "4", "5"].iter().map(|s| s.to_string()).collect();
+        // "0" as a start and "-1" as an end are the first/last available episode.
+        assert_eq!(parse_episode_arg("0--1", &eps), eps);
+        assert_eq!(parse_episode_arg("3--1", &eps), ["3", "4", "5"]);
+        assert_eq!(parse_episode_arg("0-3", &eps), ["2", "3"]);
+        // "-1" alone is the latest episode.
+        assert_eq!(parse_episode_arg("-1", &eps), ["5"]);
+        // Ordinary forms are unchanged.
+        assert_eq!(parse_episode_arg("3-4", &eps), ["3", "4"]);
+        assert_eq!(parse_episode_arg("5 3", &eps), ["5", "3"]);
+        assert_eq!(parse_episode_arg("2,4", &eps), ["2", "4"]);
+        assert!(parse_episode_arg("8-9", &eps).is_empty());
+    }
+
+    #[test]
+    fn odd_tokens_are_passed_through_not_panicked_on() {
+        let eps: Vec<String> = ["1", "2"].iter().map(|s| s.to_string()).collect();
+        // Multi-byte first character: must not byte-slice mid-character.
+        assert!(parse_episode_arg("ワンピース-1", &eps).is_empty());
+        assert!(parse_episode_arg("-", &eps).is_empty());
+        assert!(parse_episode_arg("a-b", &eps).is_empty());
+    }
+
+    #[test]
+    fn range_matches_decimal_episodes() {
+        let eps: Vec<String> = ["1", "1.5", "2"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(parse_episode_arg("1-2", &eps), ["1", "1.5", "2"]);
+        assert_eq!(parse_episode_arg("1.5", &eps), ["1.5"]);
     }
 
     #[test]

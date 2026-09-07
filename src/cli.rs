@@ -5,7 +5,8 @@ use clap::{Parser, Subcommand};
 #[derive(Parser, Debug)]
 #[command(
     name = "ani-dl",
-    version,
+    version = crate::version::short(),
+    long_version = crate::version::long(),
     about = "Download anime via anidb.app (ani-cli v5 provider, no playback)."
 )]
 pub struct Cli {
@@ -20,8 +21,10 @@ pub struct Cli {
     #[arg(short = 'q', long)]
     pub quality: Option<String>,
 
-    /// Episode range: "1", "1-12", "1 2 5" (bypasses TUI selection).
-    #[arg(short = 'e', long)]
+    /// Episodes: "1", "1-12", "1 2 5"; 0 = first and -1 = last (e.g. "0--1"
+    /// for everything, "-1" for the latest). Bypasses TUI selection.
+    // allow_hyphen_values so a leading "-1" is read as the value, not a flag.
+    #[arg(short = 'e', long, allow_hyphen_values = true)]
     pub episodes: Option<String>,
 
     /// Use the dubbed version (default: subbed).

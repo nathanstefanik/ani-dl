@@ -10,9 +10,13 @@ use serde::Serialize;
 use crate::api::{AnidbClient, TranslationType};
 use crate::config::{config_dir, Config};
 use crate::providers::select_quality;
+use crate::version;
 
 #[derive(Debug, Serialize)]
 pub struct HealthReport {
+    /// Build that wrote this report — a stale file is otherwise hard to spot.
+    pub ani_dl_version: String,
+    pub ani_cli_parity: String,
     pub timestamp: String,
     pub query: String,
     pub show_id: String,
@@ -93,6 +97,8 @@ async fn health_check(cfg: &Config) -> Result<HealthReport> {
 
     match result {
         Ok((show, stream_count, sample_url)) => Ok(HealthReport {
+            ani_dl_version: version::short().to_string(),
+            ani_cli_parity: version::ANI_CLI_PARITY.to_string(),
             timestamp: Utc::now().to_rfc3339(),
             query: query.clone(),
             show_id: show.id,
@@ -109,6 +115,8 @@ async fn health_check(cfg: &Config) -> Result<HealthReport> {
             },
         }),
         Err(e) => Ok(HealthReport {
+            ani_dl_version: version::short().to_string(),
+            ani_cli_parity: version::ANI_CLI_PARITY.to_string(),
             timestamp: Utc::now().to_rfc3339(),
             query: query.clone(),
             show_id: String::new(),

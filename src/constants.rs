@@ -1,4 +1,4 @@
-//! Shared constants for the anidb.app backend (ani-cli v5).
+//! Shared constants for the anidb.app backend.
 
 pub const ANIDB_BASE: &str = "https://anidb.app";
 pub const ANIDB_REFERER: &str = "https://anidb.app/";

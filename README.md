@@ -40,14 +40,14 @@ Commands:
 Options:
   -d, --download-dir <PATH>   Save directory (default: current directory)
   -q, --quality <QUALITY>     best | worst | 1080 | 720 | 480 [default: best]
-  -e, --episodes <RANGE>      "1", "1-12", "1 2 5" (bypasses the TUI)
+  -e, --episodes <RANGE>      "1", "1-12", "1 2 5"; 0 = first, -1 = last
   -D, --dubbed                Use the dubbed version
   -s, --season <N>            Season number for the SxxExx filename tag [default: 1]
   -n, --number <N>            Auto-select the nth search result (skips the TUI)
   -c, --concurrency <N>       Parallel HLS segment downloads [default: 16]
       --list-providers        Print resolved stream URLs and exit (debug)
       --no-tui                Plain-text output for scripting (needs -n and -e)
-  -v, --version               Print version
+  -V, --version               Print version (long form shows build info)
 ```
 
 ### Examples
@@ -62,6 +62,10 @@ ani-dl "attack on titan" -e 1-10 -d ~/anime -n 1
 # Dubbed
 ani-dl -D "one piece" -n 1 -e 1
 
+# Whole show (0 = first available episode, -1 = last); "-1" alone is the latest
+ani-dl "frieren" -n 1 -e 0--1
+ani-dl "frieren" -n 1 -e -1
+
 # Season/episode naming: writes Tongari.Boushi.no.Atelier.S01E13.mp4
 ani-dl "Tongari Boushi no Atelier" -n 1 -s 1 -e 13
 
@@ -75,6 +79,21 @@ TUI keys: type to filter search results, ↑/↓ to move, Enter to select, Esc t
 quit. In episode selection: `j`/`k` or arrows to move, `Space` to toggle, `a` to
 select/deselect all, `Enter` to confirm.
 
+## Versioning
+
+ani-dl's own semver is independent of the ani-cli release whose scraping it
+mirrors. `-V` prints the number and commit; `--version` also shows the target
+triple, **ani-cli parity**, and provider. `ani-dl sync` stamps both version
+numbers into `provider_health.json`.
+
+```
+ani-dl 1.0.0
+commit:         a1b2c3d45
+target:         aarch64-apple-darwin
+ani-cli parity: 5.0.4
+provider:       https://anidb.app
+```
+
 ## How it works
 
 ```
@@ -87,8 +106,9 @@ query → browse scrape → pick show → episode JSON → pick episodes
           → {Title}.S{NN}E{NN}.mp4
 ```
 
-Provider: [anidb.app](https://anidb.app), matching ani-cli v5. Sub uses the
-`jpn` language embed; `--dubbed` uses `eng`.
+Provider: [anidb.app](https://anidb.app), matching ani-cli v5 — the scraping
+paths track **ani-cli 5.0.4**. Sub uses the `jpn` language embed; `--dubbed`
+uses `eng`.
 
 ## `ani-dl sync` — health check
 
