@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use bytes::Bytes;
 use cbc::cipher::block_padding::Pkcs7;
 use cbc::cipher::{BlockDecryptMut, KeyIvInit};
@@ -141,7 +141,7 @@ impl HlsDownloader {
         let media = match playlist {
             Playlist::MediaPlaylist(m) => m,
             Playlist::MasterPlaylist(_) => {
-                return Err(anyhow!("expected media playlist, got another master"))
+                return Err(anyhow!("expected media playlist, got another master"));
             }
         };
 
@@ -149,7 +149,11 @@ impl HlsDownloader {
         // without the EXT-X-MAP init segment the concatenation is unplayable,
         // and without Range headers each EXT-X-BYTERANGE fetch grabs the whole
         // file. Fail loudly instead.
-        if media.segments.iter().any(|s| s.map.is_some() || s.byte_range.is_some()) {
+        if media
+            .segments
+            .iter()
+            .any(|s| s.map.is_some() || s.byte_range.is_some())
+        {
             return Err(anyhow!("fMP4 / byte-range HLS playlists are not supported"));
         }
 
@@ -333,7 +337,10 @@ fn maybe_decrypt(
         .get(uri)
         .ok_or_else(|| anyhow!("AES key not prefetched for {uri}"))?;
     if key_bytes.len() != 16 {
-        return Err(anyhow!("AES-128 key must be 16 bytes, got {}", key_bytes.len()));
+        return Err(anyhow!(
+            "AES-128 key must be 16 bytes, got {}",
+            key_bytes.len()
+        ));
     }
 
     // IV: explicit from the playlist, else the segment sequence number (BE).
@@ -411,7 +418,11 @@ fn pick_variant(variants: &[(u64, String)], quality: &str) -> String {
 fn base_url(url: &str) -> String {
     // Strip query, then the last path segment.
     let no_query = url.split('?').next().unwrap_or(url);
-    no_query.rsplit_once('/').map(|(b, _)| b).unwrap_or("").to_string()
+    no_query
+        .rsplit_once('/')
+        .map(|(b, _)| b)
+        .unwrap_or("")
+        .to_string()
 }
 
 fn join_url(base: &str, uri: &str) -> String {

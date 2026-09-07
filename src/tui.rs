@@ -9,14 +9,14 @@ use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
+use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
-use ratatui::Terminal;
 
 use crate::api::ShowResult;
 
@@ -62,8 +62,16 @@ fn run_search(terminal: &mut Tui, shows: &[ShowResult]) -> Result<Option<usize>>
             })
             .map(|(i, _)| i)
             .collect();
-        if state.selected().map(|s| s >= filtered.len()).unwrap_or(false) {
-            state.select(if filtered.is_empty() { None } else { Some(filtered.len() - 1) });
+        if state
+            .selected()
+            .map(|s| s >= filtered.len())
+            .unwrap_or(false)
+        {
+            state.select(if filtered.is_empty() {
+                None
+            } else {
+                Some(filtered.len() - 1)
+            });
         }
 
         terminal.draw(|f| {
@@ -90,8 +98,17 @@ fn run_search(terminal: &mut Tui, shows: &[ShowResult]) -> Result<Option<usize>>
                 })
                 .collect();
             let list = List::new(items)
-                .block(Block::default().borders(Borders::ALL).title(" ani-dl — search (Enter select, Esc quit) "))
-                .highlight_style(Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(" ani-dl — search (Enter select, Esc quit) "),
+                )
+                .highlight_style(
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )
                 .highlight_symbol("> ");
             f.render_stateful_widget(list, chunks[0], &mut state);
 
@@ -107,10 +124,10 @@ fn run_search(terminal: &mut Tui, shows: &[ShowResult]) -> Result<Option<usize>>
             match key.code {
                 KeyCode::Esc => return Ok(None),
                 KeyCode::Enter => {
-                    if let Some(sel) = state.selected() {
-                        if let Some(&idx) = filtered.get(sel) {
-                            return Ok(Some(idx));
-                        }
+                    if let Some(sel) = state.selected()
+                        && let Some(&idx) = filtered.get(sel)
+                    {
+                        return Ok(Some(idx));
                     }
                 }
                 KeyCode::Down => move_sel(&mut state, filtered.len(), 1),
@@ -171,8 +188,17 @@ fn run_episodes(terminal: &mut Tui, episodes: &[String]) -> Result<Vec<String>> 
                 })
                 .collect();
             let list = List::new(items)
-                .block(Block::default().borders(Borders::ALL).title(" select episodes "))
-                .highlight_style(Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(" select episodes "),
+                )
+                .highlight_style(
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )
                 .highlight_symbol("> ");
             f.render_stateful_widget(list, chunks[1], &mut state);
         })?;

@@ -8,7 +8,7 @@ use chrono::Utc;
 use serde::Serialize;
 
 use crate::api::{AnidbClient, TranslationType};
-use crate::config::{config_dir, Config};
+use crate::config::{Config, config_dir};
 use crate::providers::select_quality;
 use crate::version;
 
