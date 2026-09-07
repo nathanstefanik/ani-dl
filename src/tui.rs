@@ -70,7 +70,7 @@ fn run_search(terminal: &mut Tui, shows: &[ShowResult]) -> Result<Option<usize>>
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Min(1), Constraint::Length(3)])
-                .split(f.size());
+                .split(f.area());
 
             let items: Vec<ListItem> = filtered
                 .iter()
@@ -151,7 +151,7 @@ fn run_episodes(terminal: &mut Tui, episodes: &[String]) -> Result<Vec<String>> 
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Length(1), Constraint::Min(1)])
-                .split(f.size());
+                .split(f.area());
 
             let header = Paragraph::new(format!(
                 "Episodes {}–{} ({} selected)  [Space toggle · a all · Enter confirm · Esc quit]",
