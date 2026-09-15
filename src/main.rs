@@ -10,6 +10,7 @@ mod sync;
 mod tui;
 mod version;
 
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::LazyLock;
 
@@ -85,8 +86,8 @@ async fn run_download(cli: &Cli, cfg: &Config) -> Result<()> {
     let query = match &cli.query {
         Some(q) => q.clone(),
         None => {
-            if cli.no_tui {
-                anyhow::bail!("--no-tui requires a QUERY argument");
+            if !can_prompt_query(cli) {
+                anyhow::bail!("non-interactive mode requires a QUERY argument");
             }
             prompt("Search anime: ")?
         }
@@ -277,14 +278,29 @@ fn summarize_streams(streams: &[providers::Stream]) -> String {
         .join(", ")
 }
 
+fn skip_tui(cli: &Cli) -> bool {
+    cli.no_tui
+        || cli.episodes.is_some()
+        || !std::io::stdin().is_terminal()
+        || !std::io::stdout().is_terminal()
+}
+
+fn can_prompt_query(cli: &Cli) -> bool {
+    !cli.no_tui && std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
+}
+
+fn pick_index(cli: &Cli) -> Option<usize> {
+    cli.number.or_else(|| cli.episodes.is_some().then_some(1))
+}
+
 fn pick_show(results: &[ShowResult], cli: &Cli) -> Result<Option<ShowResult>> {
-    if let Some(n) = cli.number {
+    if let Some(n) = pick_index(cli) {
         if n >= 1 && n <= results.len() {
             return Ok(Some(results[n - 1].clone()));
         }
         anyhow::bail!("--number {n} out of range (1-{})", results.len());
     }
-    if cli.no_tui {
+    if skip_tui(cli) {
         for (i, s) in results.iter().enumerate() {
             let year = if s.year > 0 {
                 format!(" ({})", s.year)
@@ -298,7 +314,7 @@ fn pick_show(results: &[ShowResult], cli: &Cli) -> Result<Option<ShowResult>> {
             };
             println!("{}\t{}{eps}{year}", i + 1, s.name);
         }
-        anyhow::bail!("--no-tui: re-run with -n <N> to pick a result");
+        anyhow::bail!("non-interactive: re-run with -n <N> to pick a result");
     }
     tui::select_show(results.to_vec())
 }
@@ -417,8 +433,8 @@ fn pick_episodes(available: &[String], cli: &Cli) -> Result<Vec<String>> {
     if let Some(arg) = &cli.episodes {
         return Ok(parse_episode_arg(arg, available));
     }
-    if cli.no_tui {
-        anyhow::bail!("--no-tui requires -e <RANGE> to pick episodes");
+    if skip_tui(cli) {
+        anyhow::bail!("non-interactive mode requires -e <RANGE> to pick episodes");
     }
     // `available` is already sorted by api::episode_list and the TUI preserves
     // its order, so no re-sort is needed.

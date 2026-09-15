@@ -21,8 +21,9 @@ pub struct Cli {
     #[arg(short = 'q', long)]
     pub quality: Option<String>,
 
-    /// Episodes: "1", "1-12", "1 2 5"; 0 = first and -1 = last (e.g. "0--1"
-    /// for everything, "-1" for the latest). Bypasses TUI selection.
+    /// Episodes: "1", "1-12", "1 2 5"; 0 = first and -1 = last (e.g. "5--1"
+    /// for episode 5 through the end, "0--1" for everything). Skips the TUI
+    /// and defaults the search pick to 1 (override with -n).
     // allow_hyphen_values so a leading "-1" is read as the value, not a flag.
     #[arg(short = 'e', long, allow_hyphen_values = true)]
     pub episodes: Option<String>,
@@ -35,7 +36,7 @@ pub struct Cli {
     #[arg(short = 's', long)]
     pub season: Option<u32>,
 
-    /// Auto-select the nth search result (skips TUI).
+    /// Auto-select the nth search result (1-based). Defaults to 1 when -e is set.
     #[arg(short = 'n', long)]
     pub number: Option<usize>,
 
@@ -47,7 +48,7 @@ pub struct Cli {
     #[arg(long = "list-providers")]
     pub list_providers: bool,
 
-    /// Plain-text output, no TUI (for scripting; requires -n and -e).
+    /// Plain-text output, no TUI. Implied when -e is set or stdin/stdout is not a TTY.
     #[arg(long = "no-tui")]
     pub no_tui: bool,
 
