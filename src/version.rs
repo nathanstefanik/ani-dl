@@ -8,7 +8,7 @@ pub const ANI_CLI_PARITY: &str = "5.1.2";
 const GIT_SHA: &str = env!("ANI_DL_GIT_SHA");
 const TARGET: &str = env!("ANI_DL_TARGET");
 
-/// `-V`: `1.0.0 (a1b2c3d45)`. clap needs a `'static` string.
+/// `-V`: `1.1.0 (a1b2c3d45)`. clap needs a `'static` string.
 pub fn short() -> &'static str {
     static SHORT: LazyLock<String> = LazyLock::new(|| {
         if GIT_SHA == "unknown" {
