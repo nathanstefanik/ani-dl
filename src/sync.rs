@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use serde::Serialize;
 
-use crate::api::{AnidbClient, TranslationType};
+use crate::api::{HianimeClient, TranslationType};
 use crate::config::{config_dir, Config};
 use crate::providers::select_quality;
 use crate::version;
@@ -77,7 +77,7 @@ pub async fn run_once(cfg: &Config, verbose: bool) -> Result<()> {
 
 async fn health_check(cfg: &Config) -> Result<HealthReport> {
     let started = Instant::now();
-    let api = AnidbClient::new()?;
+    let api = HianimeClient::new()?;
     let query = &cfg.sync.test_query;
     let ep = &cfg.sync.test_episode;
 

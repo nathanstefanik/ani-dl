@@ -2,7 +2,7 @@
 name = "ani-dl"
 version = "1.0.0"
 edition = "2024"
-description = "Rust CLI for downloading anime (ani-cli UX, anidb.app backend, no playback)"
+description = "Rust CLI for downloading anime (ani-cli UX, hianime.at backend, no playback)"
 
 [[bin]]
 name = "ani-dl"
@@ -21,6 +21,7 @@ m3u8-rs = "6"
 aes = "0.8"
 cbc = { version = "0.1", features = ["alloc"] }
 hex = "0.4"
+base64 = "0.22"
 futures = "0.3"
 indicatif = "0.17"
 anyhow = "1"

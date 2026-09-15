@@ -6,6 +6,8 @@ pub struct Stream {
     pub url: String,
     pub referer: String,
     pub provider: String,
+    /// Default subtitle track from the embed, if any (downloaded as a `.vtt` sidecar).
+    pub subtitle: Option<String>,
 }
 
 /// Pick a stream for the requested quality ("best", "worst", or a height).

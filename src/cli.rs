@@ -7,7 +7,7 @@ use clap::{Parser, Subcommand};
     name = "ani-dl",
     version = crate::version::short(),
     long_version = crate::version::long(),
-    about = "Download anime via anidb.app (ani-cli v5 provider, no playback)."
+    about = "Download anime via hianime.at (ani-cli v5 provider, no playback)."
 )]
 pub struct Cli {
     /// Search term. If omitted (and a TUI is used) you'll be prompted.
@@ -78,7 +78,7 @@ pub enum Command {
         concurrency: usize,
         #[arg(short = 'q', long, default_value = "best")]
         quality: String,
-        #[arg(long, default_value = "https://anidb.app/")]
+        #[arg(long, default_value = "https://zokoanime.video/")]
         referer: String,
     },
 }

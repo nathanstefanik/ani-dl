@@ -64,6 +64,7 @@ version = "1.0.0"
 dependencies = [
  "aes",
  "anyhow",
+ "base64",
  "bytes",
  "cbc",
  "chrono",

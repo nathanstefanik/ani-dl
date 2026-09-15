@@ -17,7 +17,7 @@ use anyhow::Result;
 use clap::Parser;
 use regex::Regex;
 
-use api::{AnidbClient, ShowResult, TranslationType};
+use api::{HianimeClient, ShowResult, TranslationType};
 use cli::{Cli, Command};
 use config::Config;
 use hls::HlsDownloader;
@@ -79,7 +79,7 @@ async fn run_download(cli: &Cli, cfg: &Config) -> Result<()> {
             .unwrap_or_else(|| cfg.download.directory.clone()),
     );
 
-    let api = AnidbClient::new()?;
+    let api = HianimeClient::new()?;
 
     // Determine query.
     let query = match &cli.query {
@@ -179,6 +179,9 @@ async fn run_download(cli: &Cli, cfg: &Config) -> Result<()> {
                     s.url
                 );
             }
+            if let Some(sub) = streams.iter().find_map(|s| s.subtitle.as_ref()) {
+                println!("  subtitle: {sub}");
+            }
             continue;
         }
 
@@ -229,6 +232,13 @@ async fn run_download(cli: &Cli, cfg: &Config) -> Result<()> {
                     secs,
                     indicatif::HumanBytes((size as f64 / secs.max(0.001)) as u64),
                 );
+                if let Some(sub_url) = &chosen.subtitle {
+                    let vtt_path = out_path.with_extension("vtt");
+                    match download_sidecar(&dl_client, sub_url, &chosen.referer, &vtt_path).await {
+                        Ok(()) => eprintln!("  subtitles: {}", vtt_path.display()),
+                        Err(e) => eprintln!("  ! subtitle download failed: {e:#}"),
+                    }
+                }
             }
             Err(e) => {
                 eprintln!("  ! download failed for episode {ep}: {e:#}");
@@ -303,7 +313,7 @@ static RE_ORDINAL_SEASON: LazyLock<Regex> =
 async fn infer_season(
     show: &ShowResult,
     search_results: &[ShowResult],
-    api: &AnidbClient,
+    api: &HianimeClient,
     mode: TranslationType,
 ) -> Option<u32> {
     if let Some(n) = explicit_season_in_title(&show.name) {
@@ -417,7 +427,7 @@ fn pick_episodes(available: &[String], cli: &Cli) -> Result<Vec<String>> {
 
 /// Expand "1", "1-12", "1 2 5", "1,3,5" against the available episode list.
 ///
-/// Range bounds follow ani-cli 5.0.4: `0` as the start means the first
+/// Range bounds follow ani-cli: `0` as the start means the first
 /// available episode and `-1` means the last, so "0--1" is the whole show and
 /// "12--1" is episode 12 onwards. `-1` on its own is the latest episode.
 fn parse_episode_arg(arg: &str, available: &[String]) -> Vec<String> {
@@ -505,6 +515,24 @@ fn build_filename(name: &str, season: u32, episode: &str) -> String {
         _ => format!("E{episode}"),
     };
     format!("{title}.S{season:02}{ep_tag}")
+}
+
+async fn download_sidecar(
+    client: &wreq::Client,
+    url: &str,
+    referer: &str,
+    path: &std::path::Path,
+) -> Result<()> {
+    let bytes = client
+        .get(url)
+        .header("Referer", referer)
+        .send()
+        .await?
+        .error_for_status()?
+        .bytes()
+        .await?;
+    tokio::fs::write(path, &bytes).await?;
+    Ok(())
 }
 
 fn prompt(msg: &str) -> Result<String> {

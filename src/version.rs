@@ -1,9 +1,9 @@
 use std::sync::LazyLock;
 
-use crate::constants::ANIDB_BASE;
+use crate::constants::HIANIME_BASE;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-pub const ANI_CLI_PARITY: &str = "5.0.4";
+pub const ANI_CLI_PARITY: &str = "5.1.2";
 
 const GIT_SHA: &str = env!("ANI_DL_GIT_SHA");
 const TARGET: &str = env!("ANI_DL_TARGET");
@@ -28,7 +28,7 @@ pub fn long() -> &'static str {
              commit:         {GIT_SHA}\n\
              target:         {TARGET}\n\
              ani-cli parity: {ANI_CLI_PARITY}\n\
-             provider:       {ANIDB_BASE}"
+             provider:       {HIANIME_BASE}"
         )
     });
     &LONG
