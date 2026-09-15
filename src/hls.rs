@@ -395,7 +395,8 @@ fn pick_variant(variants: &[(u64, String)], quality: &str) -> String {
         "best" => variants[0].1.clone(),
         "worst" => variants.last().unwrap().1.clone(),
         q => {
-            if let Ok(want) = q.parse::<u64>() {
+            if let Some(want) = crate::providers::parse_quality_height(q) {
+                let want = u64::from(want);
                 if let Some(v) = variants.iter().find(|(h, _)| *h == want) {
                     return v.1.clone();
                 }
