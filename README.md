@@ -40,13 +40,13 @@ Commands:
 Options:
   -d, --download-dir <PATH>   Save directory (default: current directory)
   -q, --quality <QUALITY>     best | worst | 1080 | 720 | 480 [default: best]
-  -e, --episodes <RANGE>      "1", "1-12", "1 2 5"; 0 = first, -1 = last
+  -e, --episodes <RANGE>      "1", "1-12"; 0 = first, -1 = last; skips TUI
   -D, --dubbed                Use the dubbed version
   -s, --season <N>            Season number for the SxxExx filename tag [default: 1]
-  -n, --number <N>            Auto-select the nth search result (skips the TUI)
+  -n, --number <N>            Auto-select nth result (default 1 when -e is set)
   -c, --concurrency <N>       Parallel HLS segment downloads [default: 16]
       --list-providers        Print resolved stream URLs and exit (debug)
-      --no-tui                Plain-text output for scripting (needs -n and -e)
+      --no-tui                Plain-text output (implied by -e or a non-TTY)
   -V, --version               Print version (long form shows build info)
 ```
 
@@ -56,8 +56,8 @@ Options:
 # Interactive: TUI search, then multi-select episodes
 ani-dl
 
-# Episodes 1-10 into ~/anime, non-interactive
-ani-dl "attack on titan" -e 1-10 -d ~/anime -n 1
+# Episodes 1-10 into ~/anime; -e skips the TUI and picks result 1
+ani-dl "attack on titan" -e 1-10 -d ~/anime
 
 # Dubbed
 ani-dl -D "one piece" -n 1 -e 1
@@ -80,6 +80,17 @@ written next to the video.
 TUI keys: type to filter search results, ↑/↓ to move, Enter to select, Esc to
 quit. In episode selection: `j`/`k` or arrows to move, `Space` to toggle, `a` to
 select/deselect all, `Enter` to confirm.
+
+## Scripting / agents
+
+Passing `-e` skips the TUI and picks the first search result. `0` is the first
+available episode and `-1` is the last, so `5--1` is episode 5 through the end.
+Pass `-d` for the save directory and put the season in the query; `-s` only
+changes the `Sxx` filename tag. Agent workflow: [AGENTS.md](AGENTS.md).
+
+```sh
+ani-dl -q best -e 5--1 -d ~/downloads/videos "classroom of the elite season 4"
+```
 
 ## Versioning
 
