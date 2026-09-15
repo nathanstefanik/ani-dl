@@ -25,10 +25,12 @@ static RE_EP_NUMBER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"data-number="([^"]*)""#).expect("ep number regex"));
 static RE_EP_ID: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"data-id="([0-9]+)""#).expect("ep id regex"));
-static RE_SERVER: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"data-type="([^"]+)"\s+data-server-name="([^"]+)"\s+data-hash="([^"]+)""#)
-        .expect("server item regex")
-});
+static RE_DATA_TYPE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"data-type="([^"]+)""#).expect("data-type regex"));
+static RE_SERVER_NAME: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"data-server-name="([^"]+)""#).expect("server name regex"));
+static RE_SERVER_HASH: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"data-hash="([^"]+)""#).expect("server hash regex"));
 static RE_EMBED_BLOB: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"window\.__P="([^"]*)""#).expect("embed blob regex"));
 static RE_RESOLUTION: LazyLock<Regex> =
@@ -185,18 +187,8 @@ impl HianimeClient {
             .map(|c| c[1].to_string())
             .ok_or_else(|| anyhow!("no window.__P blob in embed page"))?;
         let json = deobfuscate_blob(&blob)?;
-        let parsed: EmbedConfig =
-            serde_json::from_str(&json).context("parsing deobfuscated embed JSON")?;
-        if !parsed.src.contains(".m3u8") {
-            anyhow::bail!("embed src is not m3u8");
-        }
-        let subtitle = parsed
-            .subtitles
-            .iter()
-            .find(|s| s.default)
-            .map(|s| s.src.clone());
-
-        self.expand_master(&parsed.src, &referer, subtitle).await
+        let (master, subtitle) = parse_embed_config(&json)?;
+        self.expand_master(&master, &referer, subtitle).await
     }
 
     async fn expand_master(
@@ -309,15 +301,42 @@ fn parse_episode_maps(html: &str, show_id: &str) -> Vec<(u64, String)> {
 }
 
 fn parse_zoko_embed(html: &str, mode: &str) -> Option<String> {
-    for caps in RE_SERVER.captures_iter(html) {
-        if &caps[1] == mode && &caps[2] == "ZokoAnime" {
-            return b64_decode(&caps[3])
-                .ok()
-                .and_then(|b| String::from_utf8(b).ok())
-                .filter(|s| !s.is_empty());
+    // Split on server-item like ani-cli, then read attributes independently so
+    // extra data-* fields between type/name/hash cannot hide ZokoAnime.
+    for item in html.split("server-item").skip(1) {
+        let dtype = RE_DATA_TYPE.captures(item).map(|c| c[1].to_string());
+        let name = RE_SERVER_NAME.captures(item).map(|c| c[1].to_string());
+        let hash = RE_SERVER_HASH.captures(item).map(|c| c[1].to_string());
+        if dtype.as_deref() != Some(mode) || name.as_deref() != Some("ZokoAnime") {
+            continue;
         }
+        let Some(hash) = hash else { continue };
+        return b64_decode(&hash)
+            .ok()
+            .and_then(|b| String::from_utf8(b).ok())
+            .filter(|s| !s.is_empty());
     }
     None
+}
+
+/// Video `src` is required; a malformed subtitle object must not fail the episode.
+fn parse_embed_config(json: &str) -> Result<(String, Option<String>)> {
+    let v: serde_json::Value =
+        serde_json::from_str(json).context("parsing deobfuscated embed JSON")?;
+    let src = v
+        .get("src")
+        .and_then(|s| s.as_str())
+        .filter(|s| s.contains(".m3u8"))
+        .ok_or_else(|| anyhow!("embed src is not m3u8"))?
+        .to_string();
+    let subtitle = v.get("subtitles").and_then(|s| s.as_array()).and_then(|arr| {
+        arr.iter()
+            .find(|t| t.get("default").and_then(|d| d.as_bool()) == Some(true))
+            .and_then(|t| t.get("src").and_then(|s| s.as_str()))
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+    });
+    Ok((src, subtitle))
 }
 
 fn envelope_html(text: &str) -> String {
@@ -384,20 +403,6 @@ fn html_unescape(s: &str) -> String {
 #[derive(Debug, Deserialize)]
 struct HtmlEnvelope {
     html: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct EmbedConfig {
-    src: String,
-    #[serde(default)]
-    subtitles: Vec<EmbedSub>,
-}
-
-#[derive(Debug, Deserialize)]
-struct EmbedSub {
-    src: String,
-    #[serde(default)]
-    default: bool,
 }
 
 #[cfg(test)]
@@ -473,7 +478,7 @@ mod tests {
     #[test]
     fn zoko_embed_picks_requested_mode() {
         let html = r#"
-            <div class="server-item" data-type="sub"
+            <div class="server-item" data-type="sub" data-id="4"
                 data-server-name="ZokoAnime"
                 data-hash="aHR0cHM6Ly96b2tvYW5pbWUudmlkZW8vc3Vi">x</div>
             <div class="server-item" data-type="dub"
@@ -496,12 +501,9 @@ mod tests {
     fn deobfuscate_round_trips_otaku_embed_key() {
         let b64 = "FFYSGRYPX08KERBdBQtAWwQTFEAVAQdLB0IbHgIVEh8QX0sAURBcD1oTHAEDHxxZCQgRR152DRMcBgJJTw8NGRYVFxdZHgoMAAYFQQBDAQoJAhNfQQIVH1cBRwkHAwVYGkVNThUZAEgYQRlHF18VE1VWCR8BXRZXTUoBVRdcHxgERRZCCEIHFkpbAkVNWEMPEEsEGA4RRhcQUAMHBBYoUA==";
         let json = deobfuscate_blob(b64).unwrap();
-        let parsed: EmbedConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.src, "https://example.com/master.m3u8");
-        assert_eq!(
-            parsed.subtitles.iter().find(|s| s.default).map(|s| s.src.as_str()),
-            Some("https://example.com/en.vtt")
-        );
+        let (src, sub) = parse_embed_config(&json).unwrap();
+        assert_eq!(src, "https://example.com/master.m3u8");
+        assert_eq!(sub.as_deref(), Some("https://example.com/en.vtt"));
     }
 
     #[test]
