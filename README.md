@@ -40,7 +40,7 @@ Commands:
 Options:
   -d, --download-dir <PATH>   Save directory (default: current directory)
   -q, --quality <QUALITY>     best | worst | 1080 | 720 | 480 [default: best]
-  -e, --episodes <RANGE>      "1", "1-12"; 0 = first, -1 = last; skips TUI
+  -e, --episodes <RANGE>      "1", "1-12"; 0 = first, -1 = last (5--1 = til end); skips TUI
   -D, --dubbed                Use the dubbed version
   -s, --season <N>            Season number for the SxxExx filename tag [default: 1]
   -n, --number <N>            Auto-select nth result (default 1 when -e is set)
