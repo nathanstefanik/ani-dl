@@ -86,7 +86,7 @@ async fn run_download(cli: &Cli, cfg: &Config) -> Result<()> {
     let query = match &cli.query {
         Some(q) => q.clone(),
         None => {
-            if !can_prompt_query(cli) {
+            if skip_tui(cli) {
                 anyhow::bail!("non-interactive mode requires a QUERY argument");
             }
             prompt("Search anime: ")?
@@ -283,10 +283,6 @@ fn skip_tui(cli: &Cli) -> bool {
         || cli.episodes.is_some()
         || !std::io::stdin().is_terminal()
         || !std::io::stdout().is_terminal()
-}
-
-fn can_prompt_query(cli: &Cli) -> bool {
-    !cli.no_tui && std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
 }
 
 fn pick_index(cli: &Cli) -> Option<usize> {
