@@ -1,8 +1,8 @@
 # ani-dl
 
 `ani-dl` is a single, self-contained **Rust** binary for downloading anime. It
-keeps the ani-cli search experience — now on the same **anidb.app** backend as
-ani-cli v5 — but has **zero runtime dependencies**: no `fzf`, no `yt-dlp`, no
+keeps the ani-cli search experience — now on the same **hianime.at** backend as
+ani-cli 5.1 — but has **zero runtime dependencies**: no `fzf`, no `yt-dlp`, no
 `ffmpeg`, no `curl-impersonate`. Search and episode selection run in a built-in
 [ratatui](https://ratatui.rs) TUI, Cloudflare is cleared with compiled-in Chrome
 TLS fingerprinting ([wreq](https://crates.io/crates/wreq)), and downloads use an
@@ -74,6 +74,8 @@ ani-dl "cyberpunk edgerunners" -n 1 -e 1 --list-providers
 ```
 
 Files are saved as `{Dotted.Title}.S{NN}E{NN}.mp4` in the download directory.
+When the embed ships a default subtitle track, a matching `.vtt` sidecar is
+written next to the video.
 
 TUI keys: type to filter search results, ↑/↓ to move, Enter to select, Esc to
 quit. In episode selection: `j`/`k` or arrows to move, `Space` to toggle, `a` to
@@ -87,28 +89,29 @@ triple, **ani-cli parity**, and provider. `ani-dl sync` stamps both version
 numbers into `provider_health.json`.
 
 ```
-ani-dl 1.0.0
+ani-dl 1.1.0
 commit:         a1b2c3d45
 target:         aarch64-apple-darwin
-ani-cli parity: 5.0.4
-provider:       https://anidb.app
+ani-cli parity: 5.1.2
+provider:       https://hianime.at
 ```
 
 ## How it works
 
 ```
-query → browse scrape → pick show → episode JSON → pick episodes
+query → search scrape → pick show → episode JSON → pick episodes
   └─ for each episode:
-       ├─ languages API → embed page → master.m3u8
-       ├─ expand quality variants
+       ├─ servers API → ZokoAnime embed → window.__P (XOR otaku-embed-v1)
+       ├─ expand quality variants (referer = embed origin)
        ├─ select_quality — pick best/worst/1080/720/480
        └─ HlsDownloader — parallel HLS segments (AES-128 in-process)
           → {Title}.S{NN}E{NN}.mp4
+          → {Title}.S{NN}E{NN}.vtt  (default subtitle track, if any)
 ```
 
-Provider: [anidb.app](https://anidb.app), matching ani-cli v5 — the scraping
-paths track **ani-cli 5.0.4**. Sub uses the `jpn` language embed; `--dubbed`
-uses `eng`.
+Provider: [hianime.at](https://hianime.at), matching ani-cli 5.1 — the scraping
+paths track **ani-cli 5.1.2**. Sub and `--dubbed` select the ZokoAnime server
+of that `data-type`. HLS hosts require the embed origin as `Referer`.
 
 ## `ani-dl sync` — health check
 

@@ -1,26 +1,38 @@
-//! anidb.app client (ani-cli v5 provider). Uses wreq Chrome TLS emulation to
-//! clear Cloudflare; plain reqwest gets 403.
+//! hianime.at client (ani-cli 5.1.2 provider). Uses wreq Chrome TLS emulation to
+//! clear Cloudflare; plain reqwest gets 403 on some hops.
 
 use std::sync::LazyLock;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine;
 use regex::Regex;
 use serde::Deserialize;
 use wreq::header::{HeaderMap, HeaderValue, USER_AGENT as H_UA};
 use wreq_util::Emulation;
 
-use crate::constants::{ANIDB_BASE, ANIDB_REFERER, USER_AGENT};
+use crate::constants::{EMBED_XOR_KEY, HIANIME_BASE, HIANIME_REFERER, USER_AGENT};
 use crate::providers::Stream;
 
-static RE_SHOW_ID: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"anime/([^"/]+-[0-9]+)""#).expect("show id regex"));
-static RE_TITLE_ATTR: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"title="([^"]+)""#).expect("title attr regex"));
-static RE_ALT_ATTR: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"alt="([^"]+)""#).expect("alt attr regex"));
-static RE_EMBED_FILE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"file:\s*'([^']+)'").expect("embed file regex"));
+static RE_FILM_NAME: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?s)<h3 class="film-name">\s*<a href="[^"]*/([^"/]+)"\s+title="([^"]+)""#)
+        .expect("film name regex")
+});
+static RE_EPS_IN_CARD: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\((\d+) eps\)").expect("eps in card regex"));
+static RE_EP_NUMBER: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"data-number="([^"]*)""#).expect("ep number regex"));
+static RE_EP_ID: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"data-id="([0-9]+)""#).expect("ep id regex"));
+static RE_DATA_TYPE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"data-type="([^"]+)""#).expect("data-type regex"));
+static RE_SERVER_NAME: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"data-server-name="([^"]+)""#).expect("server name regex"));
+static RE_SERVER_HASH: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"data-hash="([^"]+)""#).expect("server hash regex"));
+static RE_EMBED_BLOB: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"window\.__P="([^"]*)""#).expect("embed blob regex"));
 static RE_RESOLUTION: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"RESOLUTION=\d+x(\d+)").expect("resolution regex"));
 
@@ -37,28 +49,20 @@ impl TranslationType {
             TranslationType::Dub => "dub",
         }
     }
-
-    /// anidb language code: Japanese softsubs vs English dub.
-    fn lang_code(self) -> &'static str {
-        match self {
-            TranslationType::Sub => "jpn",
-            TranslationType::Dub => "eng",
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
 pub struct ShowResult {
-    /// Slug id, e.g. `cyberpunk-edgerunners-1118`.
+    /// Slug id, e.g. `cyberpunk-edgerunners-1048`.
     pub id: String,
     pub name: String,
-    /// Filled after `episode_list`; search cards do not expose a count.
+    /// From the search card (`(N eps)`); 0 if the card does not show a count.
     pub episodes: u32,
-    /// Not available from browse cards; always 0 for now.
+    /// Not available from search cards; always 0 for now.
     pub year: u32,
 }
 
-pub struct AnidbClient {
+pub struct HianimeClient {
     pub client: wreq::Client,
 }
 
@@ -69,7 +73,7 @@ fn default_headers() -> HeaderMap {
 }
 
 /// Shared wreq client with Chrome TLS fingerprint. Used for both API and
-/// downloads — anidb.app (and its HLS CDN) sit behind Cloudflare.
+/// downloads — hianime.at (and the ZokoAnime HLS CDN) sit behind Cloudflare.
 pub fn http_client() -> Result<wreq::Client> {
     wreq::Client::builder()
         .emulation(Emulation::Chrome136)
@@ -92,20 +96,26 @@ pub fn download_client() -> Result<wreq::Client> {
         .context("building download client")
 }
 
-impl AnidbClient {
+impl HianimeClient {
     pub fn new() -> Result<Self> {
         Ok(Self {
             client: http_client()?,
         })
     }
 
-    /// GET with ani-cli 5.0.4 `anidb_curl` semantics: a transport failure, a
-    /// non-2xx status, a Cloudflare interstitial and an empty body are four
-    /// distinct errors, each named in the message.
+    /// GET with ani-cli 5.1.2 `hianime_curl` semantics: a transport failure, a
+    /// non-2xx status, a Cloudflare interstitial and an empty body are distinct
+    /// errors, each named in the message.
     async fn get_text(&self, url: &str) -> Result<String> {
-        let resp = self
-            .client
-            .get(url)
+        self.get_text_referer(url, None).await
+    }
+
+    async fn get_text_referer(&self, url: &str, referer: Option<&str>) -> Result<String> {
+        let mut req = self.client.get(url);
+        if let Some(r) = referer {
+            req = req.header("Referer", r);
+        }
+        let resp = req
             .send()
             .await
             .map_err(|e| anyhow!("Connection error: could not fetch {url} ({e})"))?;
@@ -115,32 +125,24 @@ impl AnidbClient {
             .await
             .map_err(|e| anyhow!("Connection error: could not read {url} ({e})"))?;
 
-        // Cloudflare answers the challenge with its own status code; name the
-        // challenge rather than the code, as ani-cli does.
         if is_cloudflare_challenge(&body) {
             anyhow::bail!(
                 "Blocked by Cloudflare on {url}; TLS fingerprint may need updating (wreq Emulation)"
             );
         }
         if !status.is_success() {
-            let hint = if status.as_u16() == 503 {
-                " (anidb.app may be under maintenance)"
-            } else {
-                ""
-            };
-            anyhow::bail!("Request failed: HTTP {} from {url}{hint}", status.as_u16());
+            anyhow::bail!("Request failed: HTTP {} from {url}", status.as_u16());
         }
         if body.trim().is_empty() {
-            anyhow::bail!("Connection error: no response from {ANIDB_BASE} ({url})");
+            anyhow::bail!("Connection error: no response from {HIANIME_BASE} ({url})");
         }
         Ok(body)
     }
 
     pub async fn search(&self, query: &str, _mode: TranslationType) -> Result<Vec<ShowResult>> {
         let q = query.trim().replace(' ', "+");
-        let url = format!("{ANIDB_BASE}/browse?q={q}");
+        let url = format!("{HIANIME_BASE}/search?keyword={q}");
         let html = self.get_text(&url).await?;
-
         Ok(parse_search_results(&html))
     }
 
@@ -154,21 +156,9 @@ impl AnidbClient {
     async fn episode_maps(&self, show_id: &str) -> Result<Vec<(u64, String)>> {
         let numeric = show_numeric_id(show_id)
             .ok_or_else(|| anyhow!("invalid show id (expected slug-N): {show_id}"))?;
-        let url = format!("{ANIDB_BASE}/api/frontend/anime/{numeric}/episodes");
+        let url = format!("{HIANIME_BASE}/api/theme/episode/list/{numeric}");
         let text = self.get_text(&url).await?;
-        let parsed: EpisodesResponse =
-            serde_json::from_str(&text).context("parsing episodes JSON")?;
-        let mut maps: Vec<(u64, String)> = parsed
-            .episodes
-            .into_iter()
-            .map(|e| (e.id, e.number.to_string()))
-            .collect();
-        maps.sort_by(|a, b| {
-            ep_sort_key(&a.1)
-                .partial_cmp(&ep_sort_key(&b.1))
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        Ok(maps)
+        Ok(parse_episode_maps(&envelope_html(&text), show_id))
     }
 
     /// Resolve playable HLS variants for one episode.
@@ -185,39 +175,29 @@ impl AnidbClient {
             .map(|(id, _)| *id)
             .ok_or_else(|| anyhow!("episode {ep} not in list for {show_id}"))?;
 
-        let url = format!("{ANIDB_BASE}/api/frontend/episode/{ep_id}/languages");
+        let url = format!("{HIANIME_BASE}/api/theme/episode/servers?episodeId={ep_id}");
         let text = self.get_text(&url).await?;
-        let parsed: LanguagesResponse =
-            serde_json::from_str(&text).context("parsing languages JSON")?;
+        let embed = parse_zoko_embed(&envelope_html(&text), mode.as_str())
+            .ok_or_else(|| anyhow!("No sources found for {}!", mode.as_str()))?;
 
-        let want = mode.lang_code();
-        let embed = parsed
-            .languages
-            .iter()
-            .find(|l| l.code == want)
-            .or_else(|| parsed.languages.first())
-            .map(|l| l.embed_url.replace("\\/", "/"))
-            .ok_or_else(|| anyhow!("no language embeds for episode {ep}"))?;
-
-        if !parsed.languages.iter().any(|l| l.code == want) {
-            eprintln!(
-                "  ! {} not available, using {}",
-                mode.as_str(),
-                parsed.languages[0].code
-            );
-        }
-
+        let referer = origin_referer(&embed);
         let embed_html = self.get_text(&embed).await?;
-        let master = RE_EMBED_FILE
+        let blob = RE_EMBED_BLOB
             .captures(&embed_html)
             .map(|c| c[1].to_string())
-            .ok_or_else(|| anyhow!("no m3u8 file: in embed page"))?;
-
-        self.expand_master(&master).await
+            .ok_or_else(|| anyhow!("no window.__P blob in embed page"))?;
+        let json = deobfuscate_blob(&blob)?;
+        let (master, subtitle) = parse_embed_config(&json)?;
+        self.expand_master(&master, &referer, subtitle).await
     }
 
-    async fn expand_master(&self, master_url: &str) -> Result<Vec<Stream>> {
-        let text = self.get_text(master_url).await?;
+    async fn expand_master(
+        &self,
+        master_url: &str,
+        referer: &str,
+        subtitle: Option<String>,
+    ) -> Result<Vec<Stream>> {
+        let text = self.get_text_referer(master_url, Some(referer)).await?;
         if !text.contains("EXTM3U") {
             anyhow::bail!("master playlist is not m3u8");
         }
@@ -246,59 +226,156 @@ impl AnidbClient {
             streams.push(Stream {
                 height,
                 url,
-                referer: ANIDB_REFERER.to_string(),
-                provider: "anidb".to_string(),
+                referer: referer.to_string(),
+                provider: "hianime".to_string(),
+                subtitle: subtitle.clone(),
             });
         }
         if streams.is_empty() {
-            // Master may already be a media playlist — treat as single unknown quality.
             streams.push(Stream {
                 height: 0,
                 url: master_url.to_string(),
-                referer: ANIDB_REFERER.to_string(),
-                provider: "anidb".to_string(),
+                referer: referer.to_string(),
+                provider: "hianime".to_string(),
+                subtitle,
             });
         }
         Ok(streams)
     }
 }
 
-/// Pull `(slug, title)` pairs out of a browse page. Split on `<a href` first,
-/// as ani-cli does, so the title is read from the same card as the link — the
-/// card exposes it as `title=` on the anchor or `alt=` on the poster `img`.
+/// Pull `(slug, title)` pairs out of a search page. Cut off the "Top 10"
+/// sidebar first, as ani-cli does, then split on film-detail cards so a
+/// neighbouring card cannot donate its title.
 fn parse_search_results(html: &str) -> Vec<ShowResult> {
+    let html = html.split(r#"id="main-sidebar""#).next().unwrap_or(html);
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    for card in html.split("<a href") {
-        let Some(id_match) = RE_SHOW_ID.captures(card) else {
+    for card in html.split(r#"<div class="film-detail">"#).skip(1) {
+        let Some(caps) = RE_FILM_NAME.captures(card) else {
             continue;
         };
-        let id = id_match[1].to_string();
-        // Only look past the link itself, so a neighbouring card's attributes
-        // cannot be picked up as this show's title.
-        let rest = &card[id_match.get(0).map_or(0, |m| m.end())..];
-        let Some(name) = RE_TITLE_ATTR
-            .captures(rest)
-            .or_else(|| RE_ALT_ATTR.captures(rest))
-            .map(|c| html_unescape(&c[1]))
-        else {
-            continue;
-        };
+        let id = caps[1].to_string();
+        let name = html_unescape(&caps[2]);
         if !seen.insert(id.clone()) {
             continue;
         }
+        let episodes = RE_EPS_IN_CARD
+            .captures(card)
+            .and_then(|c| c[1].parse().ok())
+            .unwrap_or(0);
         out.push(ShowResult {
             id,
             name,
-            episodes: 0,
+            episodes,
             year: 0,
         });
     }
     out
 }
 
+fn parse_episode_maps(html: &str, show_id: &str) -> Vec<(u64, String)> {
+    let needle = format!("/watch/{show_id}?ep=");
+    let mut maps = Vec::new();
+    for item in html.split("ep-item").skip(1) {
+        if !item.contains(&needle) {
+            continue;
+        }
+        let Some(num) = RE_EP_NUMBER.captures(item) else {
+            continue;
+        };
+        let Some(id) = RE_EP_ID.captures(item) else {
+            continue;
+        };
+        let Ok(ep_id) = id[1].parse() else {
+            continue;
+        };
+        maps.push((ep_id, num[1].to_string()));
+    }
+    maps.sort_by(|a, b| {
+        ep_sort_key(&a.1)
+            .partial_cmp(&ep_sort_key(&b.1))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    maps
+}
+
+fn parse_zoko_embed(html: &str, mode: &str) -> Option<String> {
+    // Split on server-item like ani-cli, then read attributes independently so
+    // extra data-* fields between type/name/hash cannot hide ZokoAnime.
+    for item in html.split("server-item").skip(1) {
+        let dtype = RE_DATA_TYPE.captures(item).map(|c| c[1].to_string());
+        let name = RE_SERVER_NAME.captures(item).map(|c| c[1].to_string());
+        let hash = RE_SERVER_HASH.captures(item).map(|c| c[1].to_string());
+        if dtype.as_deref() != Some(mode) || name.as_deref() != Some("ZokoAnime") {
+            continue;
+        }
+        let Some(hash) = hash else { continue };
+        return b64_decode(&hash)
+            .ok()
+            .and_then(|b| String::from_utf8(b).ok())
+            .filter(|s| !s.is_empty());
+    }
+    None
+}
+
+/// Video `src` is required; a malformed subtitle object must not fail the episode.
+fn parse_embed_config(json: &str) -> Result<(String, Option<String>)> {
+    let v: serde_json::Value =
+        serde_json::from_str(json).context("parsing deobfuscated embed JSON")?;
+    let src = v
+        .get("src")
+        .and_then(|s| s.as_str())
+        .filter(|s| s.contains(".m3u8"))
+        .ok_or_else(|| anyhow!("embed src is not m3u8"))?
+        .to_string();
+    let subtitle = v.get("subtitles").and_then(|s| s.as_array()).and_then(|arr| {
+        arr.iter()
+            .find(|t| t.get("default").and_then(|d| d.as_bool()) == Some(true))
+            .and_then(|t| t.get("src").and_then(|s| s.as_str()))
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+    });
+    Ok((src, subtitle))
+}
+
+fn envelope_html(text: &str) -> String {
+    serde_json::from_str::<HtmlEnvelope>(text)
+        .map(|e| e.html)
+        .unwrap_or_else(|_| text.replace('\\', ""))
+}
+
+pub fn deobfuscate_blob(b64: &str) -> Result<String> {
+    let raw = b64_decode(b64)?;
+    let xor: Vec<u8> = raw
+        .iter()
+        .enumerate()
+        .map(|(i, b)| b ^ EMBED_XOR_KEY[i % EMBED_XOR_KEY.len()])
+        .collect();
+    String::from_utf8(xor).context("deobfuscated blob is not utf-8")
+}
+
+fn b64_decode(s: &str) -> Result<Vec<u8>> {
+    let mut padded = s.trim().to_string();
+    while padded.len() % 4 != 0 {
+        padded.push('=');
+    }
+    B64.decode(padded.as_bytes())
+        .map_err(|e| anyhow!("base64 decode: {e}"))
+}
+
+fn origin_referer(url: &str) -> String {
+    if let Some(scheme_end) = url.find("://") {
+        let after = &url[scheme_end + 3..];
+        let host = after.split('/').next().unwrap_or(after);
+        format!("{}{host}/", &url[..scheme_end + 3])
+    } else {
+        HIANIME_REFERER.to_string()
+    }
+}
+
 fn is_cloudflare_challenge(body: &str) -> bool {
-    body.contains("Just a moment") || body.contains("cf-mitigated")
+    body.contains("<title>Just a moment") || body.contains("cf-mitigated")
 }
 
 fn show_numeric_id(show_id: &str) -> Option<&str> {
@@ -324,25 +401,8 @@ fn html_unescape(s: &str) -> String {
 }
 
 #[derive(Debug, Deserialize)]
-struct EpisodesResponse {
-    episodes: Vec<EpisodeEntry>,
-}
-
-#[derive(Debug, Deserialize)]
-struct EpisodeEntry {
-    id: u64,
-    number: serde_json::Value,
-}
-
-#[derive(Debug, Deserialize)]
-struct LanguagesResponse {
-    languages: Vec<LanguageEntry>,
-}
-
-#[derive(Debug, Deserialize)]
-struct LanguageEntry {
-    code: String,
-    embed_url: String,
+struct HtmlEnvelope {
+    html: String,
 }
 
 #[cfg(test)]
@@ -350,41 +410,108 @@ mod tests {
     use super::*;
 
     #[test]
-    fn search_reads_title_attribute() {
-        let html = r#"<div><a href="/anime/sousou-no-frieren-1234" title="Sousou no Frieren">
-            <img src="/p.jpg" alt="poster"></a></div>"#;
+    fn search_reads_film_name_and_cuts_sidebar() {
+        let html = r#"
+            <div class="film-detail">
+                <h3 class="film-name">
+                    <a href="https://hianime.at/sousou-no-frieren-1234"
+                        title="Sousou no Frieren">Sousou no Frieren</a>
+                </h3>
+                <div class="fd-infor"><span class="fdi-item">TV (28 eps)</span></div>
+            </div>
+            <div id="main-sidebar">
+                <div class="film-detail">
+                    <h3 class="film-name">
+                        <a href="https://hianime.at/junk-1" title="Sidebar Junk">nope</a>
+                    </h3>
+                </div>
+            </div>"#;
         let out = parse_search_results(html);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].id, "sousou-no-frieren-1234");
         assert_eq!(out[0].name, "Sousou no Frieren");
+        assert_eq!(out[0].episodes, 28);
     }
 
     #[test]
-    fn search_falls_back_to_img_alt() {
-        // ani-cli 5.x reads alt=; keep working if the anchor drops title=.
-        let html = r#"<a href="/anime/fruits-basket-99" class="card">
-            <img src="/p.jpg" alt="Fruits Basket &amp; Friends"></a>"#;
+    fn search_unescapes_title_entities() {
+        let html = r#"<div class="film-detail">
+            <h3 class="film-name">
+                <a href="https://hianime.at/fruits-basket-99"
+                    title="Fruits Basket &amp; Friends">x</a>
+            </h3></div>"#;
         let out = parse_search_results(html);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].name, "Fruits Basket & Friends");
     }
 
     #[test]
-    fn search_dedupes_and_ignores_non_show_links() {
-        let html = r#"<a href="/browse?q=x" title="Browse"></a>
-            <a href="/anime/bocchi-the-rock-7" title="Bocchi the Rock!"></a>
-            <a href="/anime/bocchi-the-rock-7" title="Bocchi the Rock!"></a>"#;
+    fn search_dedupes() {
+        let html = r#"
+            <div class="film-detail">
+                <h3 class="film-name">
+                    <a href="https://hianime.at/bocchi-the-rock-7" title="Bocchi the Rock!">a</a>
+                </h3>
+            </div>
+            <div class="film-detail">
+                <h3 class="film-name">
+                    <a href="https://hianime.at/bocchi-the-rock-7" title="Bocchi the Rock!">a</a>
+                </h3>
+            </div>"#;
         let out = parse_search_results(html);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].id, "bocchi-the-rock-7");
     }
 
     #[test]
-    fn title_is_not_borrowed_from_the_previous_card() {
-        // The title attribute sits before the href here, so this card has no
-        // name of its own and must be skipped rather than stealing one.
-        let html = r#"<a title="Wrong Show" href="/anime/right-show-1"></a>"#;
-        assert!(parse_search_results(html).is_empty());
+    fn episode_maps_require_matching_slug() {
+        let html = r#"
+            <a class="ep-item" data-number="1" data-id="17575"
+               href="https://hianime.at/watch/cyberpunk-edgerunners-1048?ep=17575"></a>
+            <a class="ep-item" data-number="6" data-id="99"
+               href="https://hianime.at/watch/one-piece-100?ep=99"></a>"#;
+        let maps = parse_episode_maps(html, "cyberpunk-edgerunners-1048");
+        assert_eq!(maps, vec![(17575, "1".into())]);
+        assert!(parse_episode_maps(html, "one-piece-1").is_empty());
+    }
+
+    #[test]
+    fn zoko_embed_picks_requested_mode() {
+        let html = r#"
+            <div class="server-item" data-type="sub" data-id="4"
+                data-server-name="ZokoAnime"
+                data-hash="aHR0cHM6Ly96b2tvYW5pbWUudmlkZW8vc3Vi">x</div>
+            <div class="server-item" data-type="dub"
+                data-server-name="ZokoAnime"
+                data-hash="aHR0cHM6Ly96b2tvYW5pbWUudmlkZW8vZHVi">x</div>
+            <div class="server-item" data-type="sub"
+                data-server-name="HD-1"
+                data-hash="aHR0cHM6Ly9tZWdhcGxheS5idXp6L3N1Yg">x</div>"#;
+        assert_eq!(
+            parse_zoko_embed(html, "sub").as_deref(),
+            Some("https://zokoanime.video/sub")
+        );
+        assert_eq!(
+            parse_zoko_embed(html, "dub").as_deref(),
+            Some("https://zokoanime.video/dub")
+        );
+    }
+
+    #[test]
+    fn deobfuscate_round_trips_otaku_embed_key() {
+        let b64 = "FFYSGRYPX08KERBdBQtAWwQTFEAVAQdLB0IbHgIVEh8QX0sAURBcD1oTHAEDHxxZCQgRR152DRMcBgJJTw8NGRYVFxdZHgoMAAYFQQBDAQoJAhNfQQIVH1cBRwkHAwVYGkVNThUZAEgYQRlHF18VE1VWCR8BXRZXTUoBVRdcHxgERRZCCEIHFkpbAkVNWEMPEEsEGA4RRhcQUAMHBBYoUA==";
+        let json = deobfuscate_blob(b64).unwrap();
+        let (src, sub) = parse_embed_config(&json).unwrap();
+        assert_eq!(src, "https://example.com/master.m3u8");
+        assert_eq!(sub.as_deref(), Some("https://example.com/en.vtt"));
+    }
+
+    #[test]
+    fn origin_referer_keeps_scheme_and_host() {
+        assert_eq!(
+            origin_referer("https://zokoanime.video/stream/mal/1/sub"),
+            "https://zokoanime.video/"
+        );
     }
 
     #[test]
