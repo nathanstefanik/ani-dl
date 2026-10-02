@@ -36,6 +36,8 @@ ani-dl [OPTIONS] [QUERY]
 Commands:
   sync                 Run provider health check (add --daemon to detach)
   config               Print the config path and contents
+  follow               Manage followed shows (add/list/remove/mark)
+  update               Download new episodes of followed shows
 
 Options:
   -d, --download-dir <PATH>   Save directory (default: current directory)
@@ -92,6 +94,30 @@ changes the `Sxx` filename tag. Agent workflow: [AGENTS.md](AGENTS.md).
 ani-dl -q best -e 5--1 -d ~/downloads/videos "classroom of the elite season 4"
 ```
 
+## Following shows
+
+Track an airing show and fetch only new episodes:
+
+```sh
+ani-dl follow add -n 1 "naruto shippuden"            # follow; only future episodes download
+ani-dl follow add -n 1 --from 0 "naruto shippuden"   # --from 0 also fetches the backlog
+ani-dl follow list                                   # followed shows and done counts
+ani-dl update --dry-run                              # what's pending, without downloading
+ani-dl update                                        # fetch new episodes
+ani-dl follow mark 1 5--1                            # record episodes as done by hand
+ani-dl follow remove 1                               # stop following (files are kept)
+```
+
+Follows live in `~/.config/ani-dl/follows.toml`; episodes already available at
+`follow add` time start out marked done unless `--from` says otherwise. To have
+the sync daemon fetch new episodes automatically, set `auto_update` under
+`[sync]` in `~/.config/ani-dl/config.toml`:
+
+```toml
+[sync]
+auto_update = true
+```
+
 ## Versioning
 
 ani-dl's own semver is independent of the ani-cli release whose scraping it
@@ -100,7 +126,7 @@ triple, **ani-cli parity**, and provider. `ani-dl sync` stamps both version
 numbers into `provider_health.json`.
 
 ```
-ani-dl 1.2.1
+ani-dl 1.3.0
 commit:         a1b2c3d45
 target:         aarch64-apple-darwin
 ani-cli parity: 5.1.4
