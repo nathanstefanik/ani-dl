@@ -513,6 +513,7 @@ fn range_bound(raw: &str, available: &[String], side: Bound) -> Option<f64> {
 }
 
 static RE_UNSAFE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[^\w\s-]").unwrap());
+static RE_UNSAFE_EP: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[^\w.-]").unwrap());
 static RE_WS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[\s_]+").unwrap());
 
 /// "Tongari.Boushi.no.Atelier.S01E13" (extension added by the downloader).
@@ -524,7 +525,7 @@ fn build_filename(name: &str, season: u32, episode: &str) -> String {
 
     let ep_tag = match episode.parse::<f64>() {
         Ok(f) if f.fract() == 0.0 => format!("E{:02}", f as u64),
-        _ => format!("E{episode}"),
+        _ => format!("E{}", RE_UNSAFE_EP.replace_all(episode, "")),
     };
     format!("{title}.S{season:02}{ep_tag}")
 }
@@ -643,6 +644,23 @@ mod tests {
             build_filename(&base, 2, "1"),
             "Kaguya-sama.wa.Kokurasetai.S02E01"
         );
+    }
+
+    #[test]
+    fn filename_strips_windows_unsafe_chars() {
+        let name = build_filename("Fate/Zero: <Test> \"A|B\" ?*\\", 1, "1");
+        for c in "<>:\"/\\|?*".chars() {
+            assert!(!name.contains(c), "filename contains {c:?}: {name}");
+        }
+        assert_eq!(name, "FateZero.Test.AB.S01E01");
+    }
+
+    #[test]
+    fn filename_episode_tag_is_sanitized() {
+        assert_eq!(build_filename("Show", 1, "12.5"), "Show.S01E12.5");
+        assert_eq!(build_filename("Show", 1, "1/2"), "Show.S01E12");
+        assert!(!build_filename("Show", 1, "1/2").contains('/'));
+        assert_eq!(build_filename("Show", 2, "3"), "Show.S02E03");
     }
 
     #[test]
