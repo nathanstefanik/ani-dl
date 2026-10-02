@@ -1,4 +1,4 @@
-//! hianime.at client (ani-cli 5.1.2 provider). Uses wreq Chrome TLS emulation to
+//! hianime.at client (ani-cli 5.1.4 provider). Uses wreq Chrome TLS emulation to
 //! clear Cloudflare; plain reqwest gets 403 on some hops.
 
 use std::sync::LazyLock;
@@ -502,6 +502,15 @@ mod tests {
         let b64 = "FFYSGRYPX08KERBdBQtAWwQTFEAVAQdLB0IbHgIVEh8QX0sAURBcD1oTHAEDHxxZCQgRR152DRMcBgJJTw8NGRYVFxdZHgoMAAYFQQBDAQoJAhNfQQIVH1cBRwkHAwVYGkVNThUZAEgYQRlHF18VE1VWCR8BXRZXTUoBVRdcHxgERRZCCEIHFkpbAkVNWEMPEEsEGA4RRhcQUAMHBBYoUA==";
         let json = deobfuscate_blob(b64).unwrap();
         let (src, sub) = parse_embed_config(&json).unwrap();
+        assert_eq!(src, "https://example.com/master.m3u8");
+        assert_eq!(sub.as_deref(), Some("https://example.com/en.vtt"));
+    }
+
+    #[test]
+    fn subtitle_label_with_bracket_still_resolves() {
+        // ani-cli 5.1.3 (#1912): a `]` inside a subtitle label must not drop it.
+        let json = r#"{"src":"https://example.com/master.m3u8","subtitles":[{"label":"Español [Latino]","src":"https://example.com/es.vtt","default":false},{"label":"English [CC]","src":"https://example.com/en.vtt","default":true}]}"#;
+        let (src, sub) = parse_embed_config(json).unwrap();
         assert_eq!(src, "https://example.com/master.m3u8");
         assert_eq!(sub.as_deref(), Some("https://example.com/en.vtt"));
     }

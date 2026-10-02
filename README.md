@@ -100,10 +100,10 @@ triple, **ani-cli parity**, and provider. `ani-dl sync` stamps both version
 numbers into `provider_health.json`.
 
 ```
-ani-dl 1.2.0
+ani-dl 1.2.1
 commit:         a1b2c3d45
 target:         aarch64-apple-darwin
-ani-cli parity: 5.1.2
+ani-cli parity: 5.1.4
 provider:       https://hianime.at
 ```
 
@@ -121,7 +121,7 @@ query → search scrape → pick show → episode JSON → pick episodes
 ```
 
 Provider: [hianime.at](https://hianime.at), matching ani-cli 5.1 — the scraping
-paths track **ani-cli 5.1.2**. Sub and `--dubbed` select the ZokoAnime server
+paths track **ani-cli 5.1.4**. Sub and `--dubbed` select the ZokoAnime server
 of that `data-type`. HLS hosts require the embed origin as `Referer`.
 
 ## `ani-dl sync` — health check
