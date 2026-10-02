@@ -31,3 +31,16 @@ User: download classroom of the elite season 4 episodes 5 til end at best qualit
 ```sh
 ani-dl -q best -e 5--1 -d ~/downloads/videos "classroom of the elite season 4"
 ```
+
+## Follow / update
+
+- "follow X" / "keep me up to date on X" →
+
+  ```sh
+  ani-dl follow add -n 1 [-D] [-d <dir>] [--from <ep>] "naruto shippuden"
+  ```
+
+  Pass `-n` — agents are non-TTY so there is no picker. `--from 0` also grabs
+  back episodes; without `--from`, only episodes airing after the add download.
+- "get new episodes" → `ani-dl update`. `--dry-run` lists pending episodes
+  without downloading.

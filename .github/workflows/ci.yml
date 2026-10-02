@@ -37,3 +37,4 @@ jobs:
           cargo run --locked -- --version
           cargo run --locked -- --help
           cargo run --locked -- config
+          cargo run --locked -- follow list
