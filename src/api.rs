@@ -507,6 +507,15 @@ mod tests {
     }
 
     #[test]
+    fn subtitle_label_with_bracket_still_resolves() {
+        // ani-cli 5.1.3 (#1912): a `]` inside a subtitle label must not drop it.
+        let json = r#"{"src":"https://example.com/master.m3u8","subtitles":[{"label":"Español [Latino]","src":"https://example.com/es.vtt","default":false},{"label":"English [CC]","src":"https://example.com/en.vtt","default":true}]}"#;
+        let (src, sub) = parse_embed_config(json).unwrap();
+        assert_eq!(src, "https://example.com/master.m3u8");
+        assert_eq!(sub.as_deref(), Some("https://example.com/en.vtt"));
+    }
+
+    #[test]
     fn origin_referer_keeps_scheme_and_host() {
         assert_eq!(
             origin_referer("https://zokoanime.video/stream/mal/1/sub"),
