@@ -3,12 +3,12 @@ use std::sync::LazyLock;
 use crate::constants::HIANIME_BASE;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-pub const ANI_CLI_PARITY: &str = "5.1.2";
+pub const ANI_CLI_PARITY: &str = "5.1.4";
 
 const GIT_SHA: &str = env!("ANI_DL_GIT_SHA");
 const TARGET: &str = env!("ANI_DL_TARGET");
 
-/// `-V`: `1.2.0 (a1b2c3d45)`. clap needs a `'static` string.
+/// `-V`: `1.2.1 (a1b2c3d45)`. clap needs a `'static` string.
 pub fn short() -> &'static str {
     static SHORT: LazyLock<String> = LazyLock::new(|| {
         if GIT_SHA == "unknown" {
