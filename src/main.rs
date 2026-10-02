@@ -4,6 +4,7 @@ mod api;
 mod cli;
 mod config;
 mod constants;
+mod download;
 mod hls;
 mod providers;
 mod sync;
@@ -14,15 +15,15 @@ use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::LazyLock;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use regex::Regex;
 
 use api::{HianimeClient, ShowResult, TranslationType};
 use cli::{Cli, Command};
 use config::Config;
+use download::{download_episode, fmt_height, summarize_streams, EpisodeOutcome, EpisodeTarget};
 use hls::HlsDownloader;
-use providers::select_quality;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -103,7 +104,7 @@ async fn run_download(cli: &Cli, cfg: &Config) -> Result<()> {
     }
 
     // Select show.
-    let show = pick_show(&results, cli)?;
+    let show = pick_show(&results, pick_index(cli), skip_tui(cli))?;
     let Some(show) = show else {
         return Ok(());
     };
@@ -112,20 +113,7 @@ async fn run_download(cli: &Cli, cfg: &Config) -> Result<()> {
         None => infer_season(&show, &results, &api, mode).await,
     };
     let season = known_season.unwrap_or(1);
-    // Once the season is known, the subtitle is redundant — S02 already says
-    // it — so name files after the franchise base ("Kaguya-sama wa
-    // Kokurasetai" instead of "... ? Tensai-tachi no Renai Zunousen").
-    let file_title = match known_season {
-        Some(_) => {
-            let base = base_title(&show.name);
-            if base.is_empty() {
-                show.name.clone()
-            } else {
-                base
-            }
-        }
-        None => show.name.clone(),
-    };
+    let file_title = file_title_for(&show.name, known_season);
 
     // Episode list.
     let available = api.episode_list(&show.id, mode).await?;
@@ -152,97 +140,31 @@ async fn run_download(cli: &Cli, cfg: &Config) -> Result<()> {
     let total = episodes.len();
     for (i, ep) in episodes.iter().enumerate() {
         eprintln!("\n=== Episode {ep} ({}/{total}) ===", i + 1);
-        let streams = match api.episode_streams(&show.id, ep, mode).await {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("  ! failed to resolve episode {ep}: {e:#}");
-                failures += 1;
-                continue;
-            }
-        };
-        eprintln!(
-            "  resolved {} stream(s): {}",
-            streams.len(),
-            summarize_streams(&streams)
-        );
 
         if cli.list_providers {
-            if streams.is_empty() {
-                eprintln!("  (no streams resolved)");
-            }
-            let mut ordered: Vec<&providers::Stream> = streams.iter().collect();
-            ordered.sort_by_key(|s| std::cmp::Reverse(s.height));
-            for s in &ordered {
-                println!(
-                    "  [{:>10}] {:>5}  {}",
-                    s.provider,
-                    fmt_height(s.height),
-                    s.url
-                );
-            }
-            if let Some(sub) = streams.iter().find_map(|s| s.subtitle.as_ref()) {
-                println!("  subtitle: {sub}");
+            if let Err(e) = list_streams(&api, &show.id, ep, mode).await {
+                eprintln!("  ! {e:#}");
+                failures += 1;
             }
             continue;
         }
 
-        let Some(chosen) = select_quality(&streams, &quality) else {
-            eprintln!("  ! no stream found for episode {ep}");
-            failures += 1;
-            continue;
-        };
-        eprintln!(
-            "  source: {} ({})",
-            chosen.provider,
-            fmt_height(chosen.height)
-        );
-        eprintln!("  url: {}", chosen.url);
-
-        std::fs::create_dir_all(&out_dir)?;
-        let filename = build_filename(&file_title, season, ep);
-        let out_path = out_dir.join(format!("{filename}.mp4"));
-
-        if out_path.exists() && !cli.force {
-            let size = std::fs::metadata(&out_path).map(|m| m.len()).unwrap_or(0);
-            eprintln!(
-                "  skipping: {} already exists ({})",
-                out_path.display(),
-                indicatif::HumanBytes(size),
-            );
-            skipped += 1;
-            continue;
-        }
-
-        eprintln!("  saving to: {}", out_path.display());
-
-        let dl = HlsDownloader::new(
-            dl_client.clone(),
+        let target = EpisodeTarget {
+            show_id: &show.id,
+            file_title: &file_title,
+            season,
+            mode,
+            quality: &quality,
+            out_dir: &out_dir,
             concurrency,
-            chosen.referer.clone(),
-            cfg.download.retries,
-        );
-        let started = std::time::Instant::now();
-        match dl.download(&chosen.url, &out_path, &quality).await {
-            Ok(path) => {
-                let secs = started.elapsed().as_secs_f64();
-                let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-                println!(
-                    "Downloaded: {} ({} in {:.0}s, {}/s avg)",
-                    path.display(),
-                    indicatif::HumanBytes(size),
-                    secs,
-                    indicatif::HumanBytes((size as f64 / secs.max(0.001)) as u64),
-                );
-                if let Some(sub_url) = &chosen.subtitle {
-                    let vtt_path = out_path.with_extension("vtt");
-                    match download_sidecar(&dl_client, sub_url, &chosen.referer, &vtt_path).await {
-                        Ok(()) => eprintln!("  subtitles: {}", vtt_path.display()),
-                        Err(e) => eprintln!("  ! subtitle download failed: {e:#}"),
-                    }
-                }
-            }
+            retries: cfg.download.retries,
+            force: cli.force,
+        };
+        match download_episode(&api, &dl_client, &target, ep).await {
+            Ok(EpisodeOutcome::Downloaded(_)) => {}
+            Ok(EpisodeOutcome::Skipped(_)) => skipped += 1,
             Err(e) => {
-                eprintln!("  ! download failed for episode {ep}: {e:#}");
+                eprintln!("  ! {e:#}");
                 failures += 1;
             }
         }
@@ -257,25 +179,57 @@ async fn run_download(cli: &Cli, cfg: &Config) -> Result<()> {
     Ok(())
 }
 
-/// "1080p", or "???" when the height is unknown (0).
-fn fmt_height(h: u32) -> String {
-    if h > 0 {
-        format!("{h}p")
-    } else {
-        "???".to_string()
+/// Once the season is known, the subtitle is redundant — S02 already says
+/// it — so name files after the franchise base ("Kaguya-sama wa
+/// Kokurasetai" instead of "... ? Tensai-tachi no Renai Zunousen").
+fn file_title_for(show_name: &str, known_season: Option<u32>) -> String {
+    match known_season {
+        Some(_) => {
+            let base = base_title(show_name);
+            if base.is_empty() {
+                show_name.to_string()
+            } else {
+                base
+            }
+        }
+        None => show_name.to_string(),
     }
 }
 
-/// "yt (1080p), hls (720p), mp4upload (???)" — one entry per resolved stream.
-fn summarize_streams(streams: &[providers::Stream]) -> String {
+/// Resolve one episode's streams and print them for `--list-providers`.
+async fn list_streams(
+    api: &HianimeClient,
+    show_id: &str,
+    ep: &str,
+    mode: TranslationType,
+) -> Result<()> {
+    let streams = api
+        .episode_streams(show_id, ep, mode)
+        .await
+        .with_context(|| format!("failed to resolve episode {ep}"))?;
+    eprintln!(
+        "  resolved {} stream(s): {}",
+        streams.len(),
+        summarize_streams(&streams)
+    );
+
     if streams.is_empty() {
-        return "(none)".to_string();
+        eprintln!("  (no streams resolved)");
     }
-    streams
-        .iter()
-        .map(|s| format!("{} ({})", s.provider, fmt_height(s.height)))
-        .collect::<Vec<_>>()
-        .join(", ")
+    let mut ordered: Vec<&providers::Stream> = streams.iter().collect();
+    ordered.sort_by_key(|s| std::cmp::Reverse(s.height));
+    for s in &ordered {
+        println!(
+            "  [{:>10}] {:>5}  {}",
+            s.provider,
+            fmt_height(s.height),
+            s.url
+        );
+    }
+    if let Some(sub) = streams.iter().find_map(|s| s.subtitle.as_ref()) {
+        println!("  subtitle: {sub}");
+    }
+    Ok(())
 }
 
 fn skip_tui(cli: &Cli) -> bool {
@@ -289,14 +243,18 @@ fn pick_index(cli: &Cli) -> Option<usize> {
     cli.number.or_else(|| cli.episodes.is_some().then_some(1))
 }
 
-fn pick_show(results: &[ShowResult], cli: &Cli) -> Result<Option<ShowResult>> {
-    if let Some(n) = pick_index(cli) {
+fn pick_show(
+    results: &[ShowResult],
+    number: Option<usize>,
+    skip_tui: bool,
+) -> Result<Option<ShowResult>> {
+    if let Some(n) = number {
         if n >= 1 && n <= results.len() {
             return Ok(Some(results[n - 1].clone()));
         }
         anyhow::bail!("--number {n} out of range (1-{})", results.len());
     }
-    if skip_tui(cli) {
+    if skip_tui {
         for (i, s) in results.iter().enumerate() {
             let year = if s.year > 0 {
                 format!(" ({})", s.year)
@@ -512,42 +470,6 @@ fn range_bound(raw: &str, available: &[String], side: Bound) -> Option<f64> {
     }
 }
 
-static RE_UNSAFE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[^\w\s-]").unwrap());
-static RE_UNSAFE_EP: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[^\w.-]").unwrap());
-static RE_WS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[\s_]+").unwrap());
-
-/// "Tongari.Boushi.no.Atelier.S01E13" (extension added by the downloader).
-fn build_filename(name: &str, season: u32, episode: &str) -> String {
-    let cleaned = RE_UNSAFE.replace_all(name, "");
-    let dotted = RE_WS.replace_all(cleaned.trim(), ".");
-    let dotted = dotted.trim_matches('.');
-    let title = if dotted.is_empty() { "anime" } else { dotted };
-
-    let ep_tag = match episode.parse::<f64>() {
-        Ok(f) if f.fract() == 0.0 => format!("E{:02}", f as u64),
-        _ => format!("E{}", RE_UNSAFE_EP.replace_all(episode, "")),
-    };
-    format!("{title}.S{season:02}{ep_tag}")
-}
-
-async fn download_sidecar(
-    client: &wreq::Client,
-    url: &str,
-    referer: &str,
-    path: &std::path::Path,
-) -> Result<()> {
-    let bytes = client
-        .get(url)
-        .header("Referer", referer)
-        .send()
-        .await?
-        .error_for_status()?
-        .bytes()
-        .await?;
-    tokio::fs::write(path, &bytes).await?;
-    Ok(())
-}
-
 fn prompt(msg: &str) -> Result<String> {
     use std::io::{self, Write};
     print!("{msg}");
@@ -635,32 +557,6 @@ mod tests {
         assert_eq!(base_title("Mob Psycho 100 Season 3"), "Mob Psycho 100");
         assert_eq!(base_title("Haikyuu!! 2nd Season"), "Haikyuu");
         assert_eq!(base_title("Sousou no Frieren"), "Sousou no Frieren");
-    }
-
-    #[test]
-    fn filename_uses_base_title_for_known_season() {
-        let base = base_title("Kaguya-sama wa Kokurasetai? Tensai-tachi no Renai Zunousen");
-        assert_eq!(
-            build_filename(&base, 2, "1"),
-            "Kaguya-sama.wa.Kokurasetai.S02E01"
-        );
-    }
-
-    #[test]
-    fn filename_strips_windows_unsafe_chars() {
-        let name = build_filename("Fate/Zero: <Test> \"A|B\" ?*\\", 1, "1");
-        for c in "<>:\"/\\|?*".chars() {
-            assert!(!name.contains(c), "filename contains {c:?}: {name}");
-        }
-        assert_eq!(name, "FateZero.Test.AB.S01E01");
-    }
-
-    #[test]
-    fn filename_episode_tag_is_sanitized() {
-        assert_eq!(build_filename("Show", 1, "12.5"), "Show.S01E12.5");
-        assert_eq!(build_filename("Show", 1, "1/2"), "Show.S01E12");
-        assert!(!build_filename("Show", 1, "1/2").contains('/'));
-        assert_eq!(build_filename("Show", 2, "3"), "Show.S02E03");
     }
 
     #[test]
