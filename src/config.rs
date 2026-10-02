@@ -29,6 +29,8 @@ pub struct SyncConfig {
     /// Search query used by `ani-dl sync` health check.
     pub test_query: String,
     pub test_episode: String,
+    /// Also run `ani-dl update` on each daemon tick.
+    pub auto_update: bool,
 }
 
 impl Default for DownloadConfig {
@@ -48,6 +50,7 @@ impl Default for SyncConfig {
             interval_hours: 24,
             test_query: "cyberpunk edgerunners".to_string(),
             test_episode: "1".to_string(),
+            auto_update: false,
         }
     }
 }
@@ -84,5 +87,17 @@ impl Config {
         let text = toml::to_string_pretty(self)?;
         fs::write(config_path()?, text)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sync_config_without_auto_update_defaults_false() {
+        let cfg: Config = toml::from_str("[sync]\ninterval_hours = 6\n").unwrap();
+        assert!(!cfg.sync.auto_update);
+        assert_eq!(cfg.sync.interval_hours, 6);
     }
 }

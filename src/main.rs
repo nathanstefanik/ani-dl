@@ -5,6 +5,7 @@ mod cli;
 mod config;
 mod constants;
 mod download;
+mod follow;
 mod hls;
 mod providers;
 mod sync;
@@ -45,6 +46,36 @@ async fn main() -> Result<()> {
             let path = config::config_path()?;
             println!("Config path: {}", path.display());
             println!("---\n{}", toml::to_string_pretty(&cfg)?);
+            Ok(())
+        }
+        Some(Command::Follow { action }) => follow::run(&cfg, action).await,
+        Some(Command::Update {
+            shows,
+            dry_run,
+            concurrency,
+            force,
+        }) => {
+            let summary = follow::run_update(
+                &cfg,
+                &follow::UpdateOpts {
+                    selectors: shows.clone(),
+                    dry_run: *dry_run,
+                    concurrency: *concurrency,
+                    force: *force,
+                },
+            )
+            .await?;
+            let mut line = format!(
+                "Update: {} new episode(s) across {} show(s)",
+                summary.downloaded, summary.shows_checked
+            );
+            if summary.failed > 0 {
+                line.push_str(&format!(", {} failed", summary.failed));
+            }
+            println!("{line}");
+            if summary.failed > 0 || !summary.errors.is_empty() {
+                anyhow::bail!("update completed with errors");
+            }
             Ok(())
         }
         Some(Command::Hls {
@@ -161,8 +192,8 @@ async fn run_download(cli: &Cli, cfg: &Config) -> Result<()> {
             force: cli.force,
         };
         match download_episode(&api, &dl_client, &target, ep).await {
-            Ok(EpisodeOutcome::Downloaded(_)) => {}
-            Ok(EpisodeOutcome::Skipped(_)) => skipped += 1,
+            Ok(EpisodeOutcome::Downloaded) => {}
+            Ok(EpisodeOutcome::Skipped) => skipped += 1,
             Err(e) => {
                 eprintln!("  ! {e:#}");
                 failures += 1;
@@ -232,11 +263,12 @@ async fn list_streams(
     Ok(())
 }
 
+fn non_tty() -> bool {
+    !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal()
+}
+
 fn skip_tui(cli: &Cli) -> bool {
-    cli.no_tui
-        || cli.episodes.is_some()
-        || !std::io::stdin().is_terminal()
-        || !std::io::stdout().is_terminal()
+    cli.no_tui || cli.episodes.is_some() || non_tty()
 }
 
 fn pick_index(cli: &Cli) -> Option<usize> {

@@ -167,6 +167,22 @@ pub async fn run_daemon(cfg: Config) -> Result<()> {
                 if let Err(e) = run_once(&cfg, false).await {
                     log_line(&format!("health check error: {e:#}"))?;
                 }
+                if cfg.sync.auto_update {
+                    match crate::follow::run_update(&cfg, &crate::follow::UpdateOpts::default())
+                        .await
+                    {
+                        Ok(s) => {
+                            log_line(&format!(
+                                "update: {} new, {} failed",
+                                s.downloaded, s.failed
+                            ))?;
+                            for e in &s.errors {
+                                log_line(&format!("update error: {e}"))?;
+                            }
+                        }
+                        Err(e) => log_line(&format!("update error: {e:#}"))?,
+                    }
+                }
             }
             _ = tokio::signal::ctrl_c() => {
                 log_line("daemon stopped (SIGINT)")?;

@@ -1,7 +1,7 @@
 //! Per-episode download: stream resolution, filename building, HLS download
 //! and subtitle sidecars.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::LazyLock;
 
 use anyhow::{Context, Result};
@@ -64,12 +64,9 @@ pub struct EpisodeTarget<'a> {
     pub force: bool,
 }
 
-// The paths are consumed by `ani-dl update` (phase 2); the download command
-// only needs the variant.
-#[allow(dead_code)]
 pub enum EpisodeOutcome {
-    Downloaded(PathBuf),
-    Skipped(PathBuf),
+    Downloaded,
+    Skipped,
 }
 
 /// Resolve, download and subtitle one episode. Prints progress lines;
@@ -111,7 +108,7 @@ pub async fn download_episode(
             out_path.display(),
             indicatif::HumanBytes(size),
         );
-        return Ok(EpisodeOutcome::Skipped(out_path));
+        return Ok(EpisodeOutcome::Skipped);
     }
 
     eprintln!("  saving to: {}", out_path.display());
@@ -143,7 +140,7 @@ pub async fn download_episode(
             Err(e) => eprintln!("  ! subtitle download failed: {e:#}"),
         }
     }
-    Ok(EpisodeOutcome::Downloaded(path))
+    Ok(EpisodeOutcome::Downloaded)
 }
 
 async fn download_sidecar(
