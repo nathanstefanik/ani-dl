@@ -1,4 +1,4 @@
-//! Shared constants for the hianime.at backend (ani-cli 5.1.4).
+//! Shared constants for the hianime.at backend (ani-cli 5.1.5).
 
 pub const HIANIME_BASE: &str = "https://hianime.at";
 pub const HIANIME_REFERER: &str = "https://hianime.at/";
