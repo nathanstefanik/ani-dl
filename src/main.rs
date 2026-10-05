@@ -23,7 +23,7 @@ use regex::Regex;
 use api::{HianimeClient, ShowResult, TranslationType};
 use cli::{Cli, Command};
 use config::Config;
-use download::{download_episode, fmt_height, summarize_streams, EpisodeOutcome, EpisodeTarget};
+use download::{EpisodeOutcome, EpisodeTarget, download_episode, fmt_height, summarize_streams};
 use hls::HlsDownloader;
 
 #[tokio::main]
@@ -325,12 +325,11 @@ async fn infer_season(
         return Some(n);
     }
     let prefix = franchise_key(&show.name);
-    if prefix.len() >= 8 {
-        if let Ok(more) = api.search(&prefix, mode).await {
-            if let Some(n) = season_by_franchise_rank(show, &more) {
-                return Some(n);
-            }
-        }
+    if prefix.len() >= 8
+        && let Ok(more) = api.search(&prefix, mode).await
+        && let Some(n) = season_by_franchise_rank(show, &more)
+    {
+        return Some(n);
     }
     None
 }
@@ -573,7 +572,10 @@ mod tests {
     #[test]
     fn lone_result_gives_no_rank() {
         let s1 = show("a", "Sousou no Frieren", 28, 2023);
-        assert_eq!(season_by_franchise_rank(&s1, &[s1.clone()]), None);
+        assert_eq!(
+            season_by_franchise_rank(&s1, std::slice::from_ref(&s1)),
+            None
+        );
     }
 
     #[test]

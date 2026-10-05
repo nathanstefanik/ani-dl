@@ -9,7 +9,7 @@ use regex::Regex;
 
 use crate::api::{HianimeClient, TranslationType};
 use crate::hls::HlsDownloader;
-use crate::providers::{select_quality, Stream};
+use crate::providers::{Stream, select_quality};
 
 /// "1080p", or "???" when the height is unknown (0).
 pub(crate) fn fmt_height(h: u32) -> String {
@@ -167,8 +167,7 @@ mod tests {
 
     #[test]
     fn filename_uses_base_title_for_known_season() {
-        let base =
-            crate::base_title("Kaguya-sama wa Kokurasetai? Tensai-tachi no Renai Zunousen");
+        let base = crate::base_title("Kaguya-sama wa Kokurasetai? Tensai-tachi no Renai Zunousen");
         assert_eq!(
             build_filename(&base, 2, "1"),
             "Kaguya-sama.wa.Kokurasetai.S02E01"

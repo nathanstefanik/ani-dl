@@ -4,9 +4,9 @@
 use std::sync::LazyLock;
 use std::time::Duration;
 
-use anyhow::{anyhow, Context, Result};
-use base64::engine::general_purpose::STANDARD as B64;
+use anyhow::{Context, Result, anyhow};
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD as B64;
 use regex::Regex;
 use serde::Deserialize;
 use wreq::header::{HeaderMap, HeaderValue, USER_AGENT as H_UA};
@@ -329,13 +329,16 @@ fn parse_embed_config(json: &str) -> Result<(String, Option<String>)> {
         .filter(|s| s.contains(".m3u8"))
         .ok_or_else(|| anyhow!("embed src is not m3u8"))?
         .to_string();
-    let subtitle = v.get("subtitles").and_then(|s| s.as_array()).and_then(|arr| {
-        arr.iter()
-            .find(|t| t.get("default").and_then(|d| d.as_bool()) == Some(true))
-            .and_then(|t| t.get("src").and_then(|s| s.as_str()))
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
-    });
+    let subtitle = v
+        .get("subtitles")
+        .and_then(|s| s.as_array())
+        .and_then(|arr| {
+            arr.iter()
+                .find(|t| t.get("default").and_then(|d| d.as_bool()) == Some(true))
+                .and_then(|t| t.get("src").and_then(|s| s.as_str()))
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+        });
     Ok((src, subtitle))
 }
 
@@ -357,7 +360,7 @@ pub fn deobfuscate_blob(b64: &str) -> Result<String> {
 
 fn b64_decode(s: &str) -> Result<Vec<u8>> {
     let mut padded = s.trim().to_string();
-    while padded.len() % 4 != 0 {
+    while !padded.len().is_multiple_of(4) {
         padded.push('=');
     }
     B64.decode(padded.as_bytes())
