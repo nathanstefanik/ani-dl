@@ -27,8 +27,6 @@ pub struct HealthReport {
     pub latency_ms: u128,
     pub stream_count: usize,
     pub sample_url: Option<String>,
-    /// Size of the first video segment, downloaded and checked as MPEG-TS.
-    pub segment_bytes: Option<u64>,
     pub error: Option<String>,
 }
 
@@ -54,12 +52,8 @@ pub async fn run_once(cfg: &Config, verbose: bool) -> Result<()> {
 
     let summary = if report.ok {
         format!(
-            "ok: {} ep {} — {} stream(s), first segment {} in {}ms",
-            report.show_name,
-            report.episode,
-            report.stream_count,
-            indicatif::HumanBytes(report.segment_bytes.unwrap_or(0)),
-            report.latency_ms
+            "ok: {} ep {} — {} stream(s) in {}ms",
+            report.show_name, report.episode, report.stream_count, report.latency_ms
         )
     } else {
         format!(
@@ -97,52 +91,41 @@ async fn health_check(cfg: &Config) -> Result<HealthReport> {
         let streams = api
             .episode_streams(&show.id, ep, TranslationType::Sub)
             .await?;
-        let sample = select_quality(&streams, "best").cloned();
-        Ok::<_, anyhow::Error>((show, streams.len(), sample))
+        let sample = select_quality(&streams, "best");
+        // Resolving a stream is not proof it downloads: fetch and check its
+        // first segment too, so a playlist that serves junk fails the check.
+        if let Some(s) = sample {
+            let dl = HlsDownloader::new(
+                crate::api::download_client()?,
+                1,
+                s.referer.clone(),
+                cfg.download.retries,
+            );
+            dl.probe(&s.url).await.context("first segment")?;
+        }
+        Ok::<_, anyhow::Error>((show, streams.len(), sample.map(|s| s.url.clone())))
     }
     .await;
 
     match result {
-        Ok((show, stream_count, sample)) => {
-            // Resolving a stream is not proof one downloads: fetch and check
-            // the first segment too, so a playlist that serves junk marks the
-            // provider unhealthy.
-            let segment = match &sample {
-                Some(s) => HlsDownloader::new(
-                    crate::api::download_client()?,
-                    1,
-                    s.referer.clone(),
-                    cfg.download.retries,
-                )
-                .probe(&s.url)
-                .await
-                .map(Some),
-                None => Ok(None),
-            };
-            let error = if stream_count == 0 {
+        Ok((show, stream_count, sample_url)) => Ok(HealthReport {
+            ani_dl_version: version::short().to_string(),
+            ani_cli_parity: version::ANI_CLI_PARITY.to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+            query: query.clone(),
+            show_id: show.id,
+            show_name: show.name,
+            episode: ep.clone(),
+            ok: stream_count > 0,
+            latency_ms: started.elapsed().as_millis(),
+            stream_count,
+            sample_url,
+            error: if stream_count == 0 {
                 Some("no streams resolved".into())
             } else {
-                segment
-                    .as_ref()
-                    .err()
-                    .map(|e| format!("first segment: {e:#}"))
-            };
-            Ok(HealthReport {
-                ani_dl_version: version::short().to_string(),
-                ani_cli_parity: version::ANI_CLI_PARITY.to_string(),
-                timestamp: Utc::now().to_rfc3339(),
-                query: query.clone(),
-                show_id: show.id,
-                show_name: show.name,
-                episode: ep.clone(),
-                ok: error.is_none(),
-                latency_ms: started.elapsed().as_millis(),
-                stream_count,
-                sample_url: sample.map(|s| s.url),
-                segment_bytes: segment.ok().flatten().map(|n| n as u64),
-                error,
-            })
-        }
+                None
+            },
+        }),
         Err(e) => Ok(HealthReport {
             ani_dl_version: version::short().to_string(),
             ani_cli_parity: version::ANI_CLI_PARITY.to_string(),
@@ -155,7 +138,6 @@ async fn health_check(cfg: &Config) -> Result<HealthReport> {
             latency_ms: started.elapsed().as_millis(),
             stream_count: 0,
             sample_url: None,
-            segment_bytes: None,
             error: Some(format!("{e:#}")),
         }),
     }

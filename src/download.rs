@@ -199,13 +199,9 @@ mod tests {
     }
 
     #[test]
-    fn check_vtt_accepts_webvtt() {
+    fn check_vtt_wants_a_webvtt_header() {
         assert!(check_vtt(b"WEBVTT\n\n00:01.000 --> 00:02.000\nhi\n").is_ok());
         assert!(check_vtt(b"\xEF\xBB\xBFWEBVTT\n").is_ok());
-    }
-
-    #[test]
-    fn check_vtt_rejects_non_webvtt() {
         assert!(check_vtt(b"<html><body><h1>404 Not Found</h1></body></html>").is_err());
         assert!(check_vtt(b"").is_err());
     }

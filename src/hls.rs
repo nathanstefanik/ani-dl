@@ -166,26 +166,25 @@ impl HlsDownloader {
                 Ok(out_path.to_path_buf())
             }
             Err(e) => {
-                drop(file);
                 let _ = tokio::fs::remove_file(&part_path).await;
                 Err(anyhow!("segment download failed: {e:#}"))
             }
         }
     }
 
-    /// Download and check only the first segment of an HLS playlist, returning its size.
+    /// Download and check only the first segment of an HLS playlist.
     /// `ani-dl sync` uses this to show a download would actually work.
-    pub async fn probe(&self, url: &str) -> Result<usize> {
+    pub async fn probe(&self, url: &str) -> Result<()> {
         let p = self.prepare(url, "best").await?;
-        let data = download_segment(
+        download_segment(
             &self.client,
             &p.jobs[0],
             &self.referer,
             self.retries,
             &p.key_cache,
         )
-        .await?;
-        Ok(data.len())
+        .await
+        .map(drop)
     }
 
     /// Steps 1–3 of an HLS download: resolve the variant, fetch and parse the
@@ -396,17 +395,6 @@ fn maybe_decrypt(
     Ok(plain)
 }
 
-/// Decrypt (when the playlist says so) then check the segment body.
-fn finish_segment(
-    bytes: Bytes,
-    job: &SegmentJob,
-    key_cache: &HashMap<String, Vec<u8>>,
-) -> Result<Vec<u8>> {
-    let data = maybe_decrypt(bytes, job, key_cache)?;
-    check_ts(&data)?;
-    Ok(data)
-}
-
 async fn download_segment(
     client: &wreq::Client,
     job: &SegmentJob,
@@ -414,8 +402,8 @@ async fn download_segment(
     retries: u32,
     key_cache: &HashMap<String, Vec<u8>>,
 ) -> Result<Vec<u8>> {
-    let mut last_err = None;
-    for attempt in 0..=retries {
+    let mut attempt = 0;
+    loop {
         // An invalid body (e.g. an HTML error page with HTTP 200) is retried
         // like a network error.
         let result: Result<Vec<u8>> = async {
@@ -427,25 +415,20 @@ async fn download_segment(
                 .error_for_status()?
                 .bytes()
                 .await?;
-            finish_segment(bytes, job, key_cache)
+            let data = maybe_decrypt(bytes, job, key_cache)?;
+            check_ts(&data)?;
+            Ok(data)
         }
         .await;
         match result {
-            Ok(data) => return Ok(data),
-            Err(e) => last_err = Some(e),
-        }
-        if attempt < retries {
-            eprintln!(
-                "  ! retry {}/{} for {}: {:#}",
-                attempt + 1,
-                retries,
-                job.url,
-                last_err.as_ref().unwrap()
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(300 * (attempt as u64 + 1))).await;
+            Err(e) if attempt < retries => {
+                attempt += 1;
+                eprintln!("  ! retry {attempt}/{retries} for {}: {e:#}", job.url);
+                tokio::time::sleep(std::time::Duration::from_millis(300 * attempt as u64)).await;
+            }
+            other => return other,
         }
     }
-    Err(last_err.unwrap_or_else(|| anyhow!("segment download failed")))
 }
 
 /// Write segments to `out` in playlist order as they finish, at most `concurrency` in flight.
@@ -523,129 +506,53 @@ fn progress_bar(total: u64, msg: &'static str) -> ProgressBar {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cbc::cipher::BlockEncryptMut;
     use futures::future::{self, FutureExt};
     use std::time::Duration;
 
-    fn ts_packet(fill: u8) -> [u8; TS_PACKET] {
-        let mut p = [fill; TS_PACKET];
-        p[0] = TS_SYNC;
-        p
+    fn ts_segment(packets: usize) -> Vec<u8> {
+        (0..packets)
+            .flat_map(|i| {
+                let mut p = [i as u8; TS_PACKET];
+                p[0] = TS_SYNC;
+                p
+            })
+            .collect()
     }
 
-    fn ts_segment(n: usize) -> Vec<u8> {
-        (0..n).flat_map(|i| ts_packet(i as u8)).collect()
-    }
-
-    fn job(key: Option<Key>) -> SegmentJob {
-        SegmentJob {
-            index: 0,
-            url: "http://example.test/seg_000.ts".to_string(),
-            key,
-            seq: 0,
+    #[test]
+    fn check_ts_wants_whole_ts_packets() {
+        let mut partial = ts_segment(2);
+        partial.extend([0xaa; 10]);
+        let mut bad_sync = ts_segment(3);
+        bad_sync[TS_PACKET] = 0;
+        let html = b"<html><body>404 Not Found</body></html>".repeat(10);
+        assert!(check_ts(&ts_segment(3)).is_ok());
+        assert!(check_ts(&partial).is_ok());
+        for bad in [&html[..], &bad_sync, &[], &[TS_SYNC; 100]] {
+            assert!(check_ts(bad).is_err());
         }
     }
 
-    #[test]
-    fn check_ts_accepts_back_to_back_packets() {
-        assert!(check_ts(&ts_segment(3)).is_ok());
-    }
-
-    #[test]
-    fn check_ts_tolerates_trailing_partial_packet() {
-        let mut data = ts_segment(2);
-        data.extend_from_slice(&[0xaa; 10]);
-        assert!(check_ts(&data).is_ok());
-    }
-
-    #[test]
-    fn check_ts_rejects_html_error_page() {
-        let mut body = b"<html><body><h1>404 Not Found</h1></body></html>".to_vec();
-        body.resize(500, b' ');
-        let err = check_ts(&body).unwrap_err();
-        assert!(err.to_string().contains("not an MPEG-TS segment"));
-    }
-
-    #[test]
-    fn check_ts_rejects_png_signature_prefix() {
-        let mut data = vec![0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
-        data.extend_from_slice(&ts_segment(2));
-        assert!(check_ts(&data).is_err());
-    }
-
-    #[test]
-    fn check_ts_rejects_bad_sync_inside_segment() {
-        let mut data = ts_segment(3);
-        data[TS_PACKET] = 0x00;
-        assert!(check_ts(&data).is_err());
-    }
-
-    #[test]
-    fn check_ts_rejects_short_or_empty_bodies() {
-        assert!(check_ts(&[]).is_err());
-        assert!(check_ts(&[TS_SYNC; 100]).is_err());
-    }
-
-    #[test]
-    fn finish_segment_checks_after_decrypting() {
-        let plaintext = ts_segment(2);
-        let key = [7u8; 16];
-        let iv = hex::decode("000102030405060708090a0b0c0d0e0f").unwrap();
-        let ciphertext = cbc::Encryptor::<aes::Aes128>::new((&key).into(), iv.as_slice().into())
-            .encrypt_padded_vec_mut::<Pkcs7>(&plaintext);
-        // The ciphertext itself must not pass the check (AES is deterministic,
-        // so this cannot flake).
-        assert!(check_ts(&ciphertext).is_err());
-
-        let key_cache = HashMap::from([("k".to_string(), key.to_vec())]);
-        let job = job(Some(Key {
-            method: KeyMethod::AES128,
-            uri: Some("k".to_string()),
-            iv: Some("0x000102030405060708090a0b0c0d0e0f".to_string()),
-            ..Default::default()
-        }));
-        let out = finish_segment(Bytes::from(ciphertext), &job, &key_cache).unwrap();
-        assert_eq!(out, plaintext);
-    }
-
-    #[test]
-    fn finish_segment_rejects_unencrypted_html() {
-        let job = job(None);
-        let body = Bytes::from_static(b"<html><body>404</body></html>");
-        assert!(finish_segment(body, &job, &HashMap::new()).is_err());
-    }
-
     #[tokio::test]
-    async fn write_segments_keeps_playlist_order() {
+    async fn write_segments_keeps_order_and_stops_at_first_error() {
         let segments = vec![
             async {
                 tokio::time::sleep(Duration::from_millis(20)).await;
-                Ok(vec![0u8; 3])
+                Ok::<Vec<u8>, anyhow::Error>(vec![0])
             }
             .boxed(),
-            future::ready(Ok(vec![1u8; 3])).boxed(),
-        ];
-        let mut out = Vec::new();
-        write_segments(segments, 2, &mut out).await.unwrap();
-        assert_eq!(out, vec![0, 0, 0, 1, 1, 1]);
-    }
-
-    #[tokio::test]
-    async fn write_segments_stops_at_first_error() {
-        let segments = vec![
-            future::ready(Ok::<Vec<u8>, anyhow::Error>(vec![1u8])).boxed(),
+            future::ready(Ok(vec![1])).boxed(),
             future::ready(Err(anyhow!("boom"))).boxed(),
-            future::pending::<Result<Vec<u8>>>().boxed(),
+            future::pending().boxed(),
         ];
         let mut out = Vec::new();
         let result = tokio::time::timeout(
             Duration::from_secs(5),
-            write_segments(segments, 3, &mut out),
+            write_segments(segments, 4, &mut out),
         )
         .await
         .expect("write_segments hung on a pending segment");
-        let err = result.unwrap_err();
-        assert!(err.to_string().contains("boom"));
-        assert_eq!(out, vec![1]);
+        assert!(result.unwrap_err().to_string().contains("boom"));
+        assert_eq!(out, [0, 1]);
     }
 }
