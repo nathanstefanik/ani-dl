@@ -9,6 +9,7 @@ use serde::Serialize;
 
 use crate::api::{HianimeClient, TranslationType};
 use crate::config::{config_dir, Config};
+use crate::hls::HlsDownloader;
 use crate::providers::select_quality;
 use crate::version;
 
@@ -90,8 +91,19 @@ async fn health_check(cfg: &Config) -> Result<HealthReport> {
         let streams = api
             .episode_streams(&show.id, ep, TranslationType::Sub)
             .await?;
-        let sample = select_quality(&streams, "best").map(|s| s.url.clone());
-        Ok::<_, anyhow::Error>((show, streams.len(), sample))
+        let sample = select_quality(&streams, "best");
+        // Resolving a stream is not proof it downloads: fetch and check its
+        // first segment too, so a playlist that serves junk fails the check.
+        if let Some(s) = sample {
+            let dl = HlsDownloader::new(
+                crate::api::download_client()?,
+                1,
+                s.referer.clone(),
+                cfg.download.retries,
+            );
+            dl.probe(&s.url).await.context("first segment")?;
+        }
+        Ok::<_, anyhow::Error>((show, streams.len(), sample.map(|s| s.url.clone())))
     }
     .await;
 

@@ -332,6 +332,13 @@ fn parse_embed_config(json: &str) -> Result<(String, Option<String>)> {
     let subtitle = v.get("subtitles").and_then(|s| s.as_array()).and_then(|arr| {
         arr.iter()
             .find(|t| t.get("default").and_then(|d| d.as_bool()) == Some(true))
+            .or_else(|| {
+                arr.iter().find(|t| {
+                    t.get("label")
+                        .and_then(|l| l.as_str())
+                        .is_some_and(|l| l.trim().to_lowercase().starts_with("english"))
+                })
+            })
             .and_then(|t| t.get("src").and_then(|s| s.as_str()))
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string())
@@ -513,6 +520,37 @@ mod tests {
         let (src, sub) = parse_embed_config(json).unwrap();
         assert_eq!(src, "https://example.com/master.m3u8");
         assert_eq!(sub.as_deref(), Some("https://example.com/en.vtt"));
+    }
+
+    #[test]
+    fn embed_subtitle_falls_back_to_english_label() {
+        let json = r#"{"src":"https://x/master.m3u8","subtitles":[
+            {"lang":"en","label":"Portuguese Brazilian_CR","default":false,"src":"https://x/pt.vtt"},
+            {"lang":"en","label":"English CR","default":false,"src":"https://x/en.vtt"},
+            {"lang":"en","label":"Arabic CR","default":false,"src":"https://x/ar.vtt"}
+        ]}"#;
+        let (_, sub) = parse_embed_config(json).unwrap();
+        assert_eq!(sub.as_deref(), Some("https://x/en.vtt"));
+    }
+
+    #[test]
+    fn embed_subtitle_prefers_default_over_english_label() {
+        let json = r#"{"src":"https://x/master.m3u8","subtitles":[
+            {"lang":"en","label":"English CR","default":false,"src":"https://x/en.vtt"},
+            {"lang":"en","label":"Spanish","default":true,"src":"https://x/es.vtt"}
+        ]}"#;
+        let (_, sub) = parse_embed_config(json).unwrap();
+        assert_eq!(sub.as_deref(), Some("https://x/es.vtt"));
+    }
+
+    #[test]
+    fn embed_subtitle_returns_none_without_default_or_english() {
+        let json = r#"{"src":"https://x/master.m3u8","subtitles":[
+            {"lang":"en","label":"Russian CR","default":false,"src":"https://x/ru.vtt"},
+            {"lang":"en","label":"Arabic CR","default":false,"src":"https://x/ar.vtt"}
+        ]}"#;
+        let (_, sub) = parse_embed_config(json).unwrap();
+        assert_eq!(sub, None);
     }
 
     #[test]
