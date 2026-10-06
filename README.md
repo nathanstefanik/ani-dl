@@ -127,7 +127,7 @@ triple, **ani-cli parity**, and provider. `ani-dl sync` stamps both version
 numbers into `provider_health.json`.
 
 ```
-ani-dl 1.3.0
+ani-dl 1.3.1
 commit:         a1b2c3d45
 target:         aarch64-apple-darwin
 ani-cli parity: 5.1.4
