@@ -76,8 +76,9 @@ ani-dl "cyberpunk edgerunners" -n 1 -e 1 --list-providers
 ```
 
 Files are saved as `{Dotted.Title}.S{NN}E{NN}.mp4` in the download directory.
-When the embed ships a default subtitle track, a matching `.vtt` sidecar is
-written next to the video.
+When the embed ships a subtitle track (the default one, else the first labelled
+English), a matching `.vtt` sidecar is written next to the video; a response that
+is not WebVTT is skipped.
 
 TUI keys: type to filter search results, ↑/↓ to move, Enter to select, Esc to
 quit. In episode selection: `j`/`k` or arrows to move, `Space` to toggle, `a` to
@@ -141,9 +142,10 @@ query → search scrape → pick show → episode JSON → pick episodes
        ├─ servers API → ZokoAnime embed → window.__P (XOR otaku-embed-v1)
        ├─ expand quality variants (referer = embed origin)
        ├─ select_quality — pick best/worst/1080/720/480
-       └─ HlsDownloader — parallel HLS segments (AES-128 in-process)
+       └─ HlsDownloader — parallel HLS segments (AES-128 in-process),
+          each checked as MPEG-TS and written to disk in playlist order
           → {Title}.S{NN}E{NN}.mp4
-          → {Title}.S{NN}E{NN}.vtt  (default subtitle track, if any)
+          → {Title}.S{NN}E{NN}.vtt  (default or English subtitle track, if any)
 ```
 
 Provider: [hianime.at](https://hianime.at), matching ani-cli 5.1 — the scraping
@@ -152,7 +154,8 @@ of that `data-type`. HLS hosts require the embed origin as `Referer`.
 
 ## `ani-dl sync` — health check
 
-`sync` searches a configured test title, resolves one episode, and writes
+`sync` searches a configured test title, resolves one episode, downloads and
+checks its first video segment, and writes
 `~/.config/ani-dl/provider_health.json`. Run it manually anytime, or detach:
 
 ```sh
@@ -161,9 +164,12 @@ ani-dl sync --daemon    # forks a detached process, writes ~/.config/ani-dl/sync
 
 ## Performance notes
 
-- **Parallel HLS** — segments download concurrently via
-  `buffer_unordered(concurrency)` (default 16). Encrypted (`#EXT-X-KEY`,
-  AES-128-CBC) streams are decrypted in-process.
+- **Parallel HLS** — segments download concurrently via `buffered(concurrency)`
+  (default 16) and are written to disk in playlist order as they finish, so memory
+  stays around `concurrency` segments instead of the whole episode. Each segment
+  must be MPEG-TS or it is retried, and the first segment that fails every retry
+  stops the episode. Encrypted (`#EXT-X-KEY`, AES-128-CBC) streams are decrypted
+  in-process before that check.
 - **Startup** — a compiled binary with no interpreter or subprocess launch; first
   search is network-bound, not startup-bound.
 

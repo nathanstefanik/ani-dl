@@ -157,8 +157,22 @@ async fn download_sidecar(
         .error_for_status()?
         .bytes()
         .await?;
+    check_vtt(&bytes)?;
     tokio::fs::write(path, &bytes).await?;
     Ok(())
+}
+
+/// A `.vtt` sidecar must actually be WebVTT — a subtitle URL that quietly
+/// serves an HTML error page with HTTP 200 is skipped instead of written.
+fn check_vtt(body: &[u8]) -> Result<()> {
+    let body = body.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(body);
+    if body.starts_with(b"WEBVTT") {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "not a WebVTT file (starts with {:?})",
+        String::from_utf8_lossy(&body[..body.len().min(16)])
+    );
 }
 
 #[cfg(test)]
@@ -182,6 +196,18 @@ mod tests {
             assert!(!name.contains(c), "filename contains {c:?}: {name}");
         }
         assert_eq!(name, "FateZero.Test.AB.S01E01");
+    }
+
+    #[test]
+    fn check_vtt_accepts_webvtt() {
+        assert!(check_vtt(b"WEBVTT\n\n00:01.000 --> 00:02.000\nhi\n").is_ok());
+        assert!(check_vtt(b"\xEF\xBB\xBFWEBVTT\n").is_ok());
+    }
+
+    #[test]
+    fn check_vtt_rejects_non_webvtt() {
+        assert!(check_vtt(b"<html><body><h1>404 Not Found</h1></body></html>").is_err());
+        assert!(check_vtt(b"").is_err());
     }
 
     #[test]
