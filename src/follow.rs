@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::{HianimeClient, TranslationType};
 use crate::cli::{FollowAction, FollowAdd};
-use crate::config::{config_dir, Config};
-use crate::download::{download_episode, EpisodeOutcome, EpisodeTarget};
+use crate::config::{Config, config_dir};
+use crate::download::{EpisodeOutcome, EpisodeTarget, download_episode};
 
 pub fn follows_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("follows.toml"))
@@ -71,11 +71,8 @@ impl Followed {
     /// Done list order: numeric value first, then the raw string — so "9"
     /// sorts before "12" and "12" before "12.5".
     fn sort_done(&mut self) {
-        self.done.sort_by(|a, b| {
-            ep_num(a)
-                .total_cmp(&ep_num(b))
-                .then_with(|| a.cmp(b))
-        });
+        self.done
+            .sort_by(|a, b| ep_num(a).total_cmp(&ep_num(b)).then_with(|| a.cmp(b)));
     }
 }
 
@@ -89,8 +86,8 @@ impl FollowList {
         if !path.exists() {
             return Ok(Self::default());
         }
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("reading {}", path.display()))?;
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))
     }
 
@@ -210,11 +207,7 @@ pub fn initial_done(available: &[String], from: Option<&str>) -> Vec<String> {
 }
 
 fn mode_label(dubbed: bool) -> &'static str {
-    if dubbed {
-        "dub"
-    } else {
-        "sub"
-    }
+    if dubbed { "dub" } else { "sub" }
 }
 
 /// Expand a leading `~/` — clap won't, and a quoted path stays literal.
@@ -368,9 +361,7 @@ async fn mark(sel: &str, range: &str, unmark: bool) -> Result<()> {
     } else {
         TranslationType::Sub
     };
-    let available = HianimeClient::new()?
-        .episode_list(&id, mode)
-        .await?;
+    let available = HianimeClient::new()?.episode_list(&id, mode).await?;
     let eps = crate::parse_episode_arg(range, &available);
     if eps.is_empty() {
         anyhow::bail!("no episodes matched '{range}'");
@@ -464,7 +455,12 @@ pub async fn run_update(cfg: &Config, opts: &UpdateOpts) -> Result<UpdateSummary
         if pending.is_empty() {
             println!("{}: up to date ({} eps)", entry.name, available.len());
         } else if opts.dry_run {
-            println!("{}: {} new — {}", entry.name, pending.len(), pending.join(", "));
+            println!(
+                "{}: {} new — {}",
+                entry.name,
+                pending.len(),
+                pending.join(", ")
+            );
             continue; // dry-run: no writes, no last_checked bump
         } else {
             let target = EpisodeTarget {
@@ -567,17 +563,17 @@ mod tests {
     fn pending_handles_decimal_episodes() {
         let mut s = followed("a", "Show", false);
         s.done = eps(&["12"]);
-        assert_eq!(
-            s.pending(&eps(&["12", "12.5", "13"])),
-            eps(&["12.5", "13"])
-        );
+        assert_eq!(s.pending(&eps(&["12", "12.5", "13"])), eps(&["12.5", "13"]));
     }
 
     // initial_done
 
     #[test]
     fn initial_done_none_marks_everything_done() {
-        assert_eq!(initial_done(&eps(&["1", "2", "3"]), None), eps(&["1", "2", "3"]));
+        assert_eq!(
+            initial_done(&eps(&["1", "2", "3"]), None),
+            eps(&["1", "2", "3"])
+        );
     }
 
     #[test]
