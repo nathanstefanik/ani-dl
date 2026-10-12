@@ -1,4 +1,4 @@
-//! hianime.at client (ani-cli 5.1.4 provider). Uses wreq Chrome TLS emulation to
+//! hianime.at client (ani-cli 5.1.5 provider). Uses wreq Chrome TLS emulation to
 //! clear Cloudflare; plain reqwest gets 403 on some hops.
 
 use std::sync::LazyLock;
