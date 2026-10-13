@@ -362,6 +362,22 @@ fn check_ts(data: &[u8]) -> Result<()> {
     ))
 }
 
+/// Some CDNs disguise segments as images: a small PNG plus a cut-off TS
+/// packet sit in front of the real stream. If the body is not already clean
+/// MPEG-TS, find the first offset where the rest is whole TS packets and drop
+/// everything before it; if there is none, return unchanged so `check_ts`
+/// still rejects junk.
+fn strip_ts_prefix(data: Vec<u8>) -> Vec<u8> {
+    if check_ts(&data).is_ok() {
+        return data;
+    }
+    let limit = data.len().min(64 * 1024);
+    if let Some(o) = (1..limit).find(|&o| data[o] == TS_SYNC && check_ts(&data[o..]).is_ok()) {
+        return data[o..].to_vec();
+    }
+    data
+}
+
 fn maybe_decrypt(
     bytes: Bytes,
     job: &SegmentJob,
@@ -428,7 +444,7 @@ async fn download_segment(
                 .error_for_status()?
                 .bytes()
                 .await?;
-            let data = maybe_decrypt(bytes, job, key_cache)?;
+            let data = strip_ts_prefix(maybe_decrypt(bytes, job, key_cache)?);
             check_ts(&data)?;
             Ok(data)
         }
@@ -548,6 +564,25 @@ mod tests {
         for bad in [&html[..], &bad_sync, &[], &[TS_SYNC; 100]] {
             assert!(check_ts(bad).is_err());
         }
+    }
+
+    #[test]
+    fn strip_ts_prefix_cuts_png_disguise() {
+        let mut disguised = b"\x89PNG\r\n\x1a\n".to_vec();
+        disguised.resize(70 - 12, 0);
+        disguised.extend(b"IEND\xaeB\x60\x82");
+        let mut cut_packet = vec![TS_SYNC, 0x40, 0x11];
+        cut_packet.resize(182, 0xff);
+        disguised.extend(cut_packet);
+        disguised.extend(ts_segment(3));
+        assert_eq!(strip_ts_prefix(disguised), ts_segment(3));
+
+        assert_eq!(strip_ts_prefix(ts_segment(3)), ts_segment(3));
+
+        let html = b"<html><body>404 Not Found</body></html>".repeat(10);
+        let out = strip_ts_prefix(html.clone());
+        assert_eq!(out, html);
+        assert!(check_ts(&out).is_err());
     }
 
     #[tokio::test]

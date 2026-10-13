@@ -140,6 +140,9 @@ provider:       https://hianime.at
 query → search scrape → pick show → episode JSON → pick episodes
   └─ for each episode:
        ├─ servers API → ZokoAnime embed → window.__P (XOR otaku-embed-v1)
+       │                + MegaPlay embed (same /stream/mal/... episode on
+       │                  megaplay.buzz, else hianime's HD-1 link)
+       │                  → getSources (AES-256-CBC enc payload)
        ├─ expand quality variants (referer = embed origin)
        ├─ select_quality — pick best/worst/1080/720/480
        └─ HlsDownloader — parallel HLS segments (AES-128 in-process),
@@ -149,8 +152,13 @@ query → search scrape → pick show → episode JSON → pick episodes
 ```
 
 Provider: [hianime.at](https://hianime.at), matching ani-cli 5.1 — the scraping
-paths track **ani-cli 5.1.5**. Sub and `--dubbed` select the ZokoAnime server
-of that `data-type`. HLS hosts require the embed origin as `Referer`.
+paths track **ani-cli 5.1.5**. Each episode resolves two servers of the
+matching `data-type` (sub or `--dubbed`): ZokoAnime (ani-cli's server) and
+MegaPlay ([megaplay.buzz](https://megaplay.buzz), hianime's "HD-1"), reached
+via the same `/stream/mal/...` episode path, falling back to the HD-1 link
+when hianime lists one. The best height wins, with ZokoAnime preferred on
+ties. HLS hosts require the embed origin as `Referer`; MegaPlay playlists and
+segments need `Referer: https://megaplay.buzz/`.
 
 ## `ani-dl sync` — health check
 

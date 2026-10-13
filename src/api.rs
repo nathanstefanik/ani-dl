@@ -7,12 +7,17 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
+use cbc::cipher::block_padding::Pkcs7;
+use cbc::cipher::{BlockDecryptMut, KeyIvInit};
 use regex::Regex;
 use serde::Deserialize;
 use wreq::header::{HeaderMap, HeaderValue, USER_AGENT as H_UA};
 use wreq_util::Emulation;
 
-use crate::constants::{EMBED_XOR_KEY, HIANIME_BASE, HIANIME_REFERER, USER_AGENT};
+use crate::constants::{
+    EMBED_XOR_KEY, HIANIME_BASE, HIANIME_REFERER, MEGAPLAY_BASE, MEGAPLAY_REFERER,
+    MEGAPLAY_SOURCES_IV, MEGAPLAY_SOURCES_KEY, USER_AGENT,
+};
 use crate::providers::Stream;
 
 static RE_FILM_NAME: LazyLock<Regex> = LazyLock::new(|| {
@@ -23,8 +28,8 @@ static RE_EPS_IN_CARD: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\((\d+) eps\)").expect("eps in card regex"));
 static RE_EP_NUMBER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"data-number="([^"]*)""#).expect("ep number regex"));
-static RE_EP_ID: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"data-id="([0-9]+)""#).expect("ep id regex"));
+static RE_DATA_ID: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"data-id="([0-9]+)""#).expect("data-id regex"));
 static RE_DATA_TYPE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"data-type="([^"]+)""#).expect("data-type regex"));
 static RE_SERVER_NAME: LazyLock<Regex> =
@@ -107,13 +112,13 @@ impl HianimeClient {
     /// non-2xx status, a Cloudflare interstitial and an empty body are distinct
     /// errors, each named in the message.
     async fn get_text(&self, url: &str) -> Result<String> {
-        self.get_text_referer(url, None).await
+        self.get_text_with(url, &[]).await
     }
 
-    async fn get_text_referer(&self, url: &str, referer: Option<&str>) -> Result<String> {
+    async fn get_text_with(&self, url: &str, headers: &[(&str, &str)]) -> Result<String> {
         let mut req = self.client.get(url);
-        if let Some(r) = referer {
-            req = req.header("Referer", r);
+        for (name, value) in headers {
+            req = req.header(*name, *value);
         }
         let resp = req
             .send()
@@ -177,18 +182,82 @@ impl HianimeClient {
 
         let url = format!("{HIANIME_BASE}/api/theme/episode/servers?episodeId={ep_id}");
         let text = self.get_text(&url).await?;
-        let embed = parse_zoko_embed(&envelope_html(&text), mode.as_str())
-            .ok_or_else(|| anyhow!("No sources found for {}!", mode.as_str()))?;
+        let servers = envelope_html(&text);
+        let zoko = parse_server_embed(&servers, mode.as_str(), "ZokoAnime");
+        let mega = zoko.as_deref().and_then(megaplay_from_zoko).or_else(|| {
+            parse_server_embed(&servers, mode.as_str(), "HD-1")
+                .filter(|u| u.starts_with(MEGAPLAY_BASE))
+        });
+        if zoko.is_none() && mega.is_none() {
+            anyhow::bail!("No sources found for {}!", mode.as_str());
+        }
 
-        let referer = origin_referer(&embed);
-        let embed_html = self.get_text(&embed).await?;
+        let zoko_fut = async {
+            match &zoko {
+                Some(embed) => Some(self.zoko_streams(embed).await),
+                None => None,
+            }
+        };
+        let mega_fut = async {
+            match &mega {
+                Some(embed) => Some(self.megaplay_streams(embed).await),
+                None => None,
+            }
+        };
+        let (zoko_res, mega_res) = tokio::join!(zoko_fut, mega_fut);
+
+        let mut streams = Vec::new();
+        let mut errors: Vec<(&str, anyhow::Error)> = Vec::new();
+        for (provider, res) in [("zokoanime", zoko_res), ("megaplay", mega_res)] {
+            match res {
+                Some(Ok(s)) => streams.extend(s),
+                Some(Err(e)) => errors.push((provider, e)),
+                None => {}
+            }
+        }
+        if streams.is_empty() {
+            let detail = errors
+                .iter()
+                .map(|(p, e)| format!("{p}: {e:#}"))
+                .collect::<Vec<_>>()
+                .join("; ");
+            anyhow::bail!(detail);
+        }
+        for (provider, e) in errors {
+            eprintln!("  ! {provider}: {e:#}");
+        }
+        Ok(streams)
+    }
+
+    async fn zoko_streams(&self, embed: &str) -> Result<Vec<Stream>> {
+        let referer = origin_referer(embed);
+        let embed_html = self.get_text(embed).await?;
         let blob = RE_EMBED_BLOB
             .captures(&embed_html)
             .map(|c| c[1].to_string())
             .ok_or_else(|| anyhow!("no window.__P blob in embed page"))?;
         let json = deobfuscate_blob(&blob)?;
         let (master, subtitle) = parse_embed_config(&json)?;
-        self.expand_master(&master, &referer, subtitle).await
+        self.expand_master(&master, &referer, subtitle, "zokoanime")
+            .await
+    }
+
+    async fn megaplay_streams(&self, embed: &str) -> Result<Vec<Stream>> {
+        let page = self
+            .get_text_with(embed, &[("Referer", HIANIME_REFERER)])
+            .await?;
+        let id = megaplay_player_id(&page)
+            .ok_or_else(|| anyhow!("MegaPlay has no player for {embed}"))?;
+        let url = megaplay_sources_url(embed, &id);
+        let json = self
+            .get_text_with(
+                &url,
+                &[("Referer", embed), ("X-Requested-With", "XMLHttpRequest")],
+            )
+            .await?;
+        let (master, subtitle) = parse_megaplay_sources(&json)?;
+        self.expand_master(&master, MEGAPLAY_REFERER, subtitle, "megaplay")
+            .await
     }
 
     async fn expand_master(
@@ -196,8 +265,11 @@ impl HianimeClient {
         master_url: &str,
         referer: &str,
         subtitle: Option<String>,
+        provider: &str,
     ) -> Result<Vec<Stream>> {
-        let text = self.get_text_referer(master_url, Some(referer)).await?;
+        let text = self
+            .get_text_with(master_url, &[("Referer", referer)])
+            .await?;
         if !text.contains("EXTM3U") {
             anyhow::bail!("master playlist is not m3u8");
         }
@@ -227,7 +299,7 @@ impl HianimeClient {
                 height,
                 url,
                 referer: referer.to_string(),
-                provider: "hianime".to_string(),
+                provider: provider.to_string(),
                 subtitle: subtitle.clone(),
             });
         }
@@ -236,7 +308,7 @@ impl HianimeClient {
                 height: 0,
                 url: master_url.to_string(),
                 referer: referer.to_string(),
-                provider: "hianime".to_string(),
+                provider: provider.to_string(),
                 subtitle,
             });
         }
@@ -284,7 +356,7 @@ fn parse_episode_maps(html: &str, show_id: &str) -> Vec<(u64, String)> {
         let Some(num) = RE_EP_NUMBER.captures(item) else {
             continue;
         };
-        let Some(id) = RE_EP_ID.captures(item) else {
+        let Some(id) = RE_DATA_ID.captures(item) else {
             continue;
         };
         let Ok(ep_id) = id[1].parse() else {
@@ -300,14 +372,14 @@ fn parse_episode_maps(html: &str, show_id: &str) -> Vec<(u64, String)> {
     maps
 }
 
-fn parse_zoko_embed(html: &str, mode: &str) -> Option<String> {
+fn parse_server_embed(html: &str, mode: &str, server_name: &str) -> Option<String> {
     // Split on server-item like ani-cli, then read attributes independently so
-    // extra data-* fields between type/name/hash cannot hide ZokoAnime.
+    // extra data-* fields between type/name/hash cannot hide the server.
     for item in html.split("server-item").skip(1) {
         let dtype = RE_DATA_TYPE.captures(item).map(|c| c[1].to_string());
         let name = RE_SERVER_NAME.captures(item).map(|c| c[1].to_string());
         let hash = RE_SERVER_HASH.captures(item).map(|c| c[1].to_string());
-        if dtype.as_deref() != Some(mode) || name.as_deref() != Some("ZokoAnime") {
+        if dtype.as_deref() != Some(mode) || name.as_deref() != Some(server_name) {
             continue;
         }
         let Some(hash) = hash else { continue };
@@ -317,6 +389,104 @@ fn parse_zoko_embed(html: &str, mode: &str) -> Option<String> {
             .filter(|s| !s.is_empty());
     }
     None
+}
+
+/// MegaPlay exposes the same `/stream/...` episode path as ZokoAnime, so the
+/// MegaPlay embed is the ZokoAnime path re-homed on megaplay.buzz.
+fn megaplay_from_zoko(zoko_url: &str) -> Option<String> {
+    let after_host = zoko_url.split("://").nth(1)?;
+    let path = after_host.split_once('/').map(|(_, p)| p)?;
+    let path = path.split('?').next().unwrap_or(path);
+    let path = format!("/{path}");
+    path.starts_with("/stream/")
+        .then(|| format!("{MEGAPLAY_BASE}{path}"))
+}
+
+/// The getSources id lives in `data-id` on the `megaplay-player` div
+/// (`data-realid` is a different id). Error pages have neither.
+fn megaplay_player_id(page: &str) -> Option<String> {
+    let player = page.split("megaplay-player").nth(1)?;
+    RE_DATA_ID.captures(player).map(|c| c[1].to_string())
+}
+
+/// `getSources`, forwarding the embed's `s` (CDN selector) param like the
+/// player JS does.
+fn megaplay_sources_url(embed: &str, id: &str) -> String {
+    let mut url = format!("{MEGAPLAY_BASE}/stream/getSources?id={id}");
+    if let Some(query) = embed.split('?').nth(1) {
+        for pair in query.split('&') {
+            if let Some(v) = pair.strip_prefix("s=") {
+                url.push_str(&format!("&s={v}"));
+            }
+        }
+    }
+    url
+}
+
+/// MegaPlay `getSources` JSON: `enc` decrypts to `{"file": master.m3u8}`;
+/// subtitles live in `tracks` (`file` instead of ZokoAnime's `src`).
+fn parse_megaplay_sources(json: &str) -> Result<(String, Option<String>)> {
+    let v: serde_json::Value =
+        serde_json::from_str(json).context("parsing megaplay sources JSON")?;
+    let enc = v
+        .get("enc")
+        .and_then(|s| s.as_str())
+        .ok_or_else(|| anyhow!("megaplay sources has no enc payload"))?;
+    let plain = decrypt_megaplay_enc(enc)?;
+    let payload: serde_json::Value =
+        serde_json::from_str(&plain).context("parsing decrypted megaplay payload")?;
+    let file = payload
+        .get("file")
+        .and_then(|s| s.as_str())
+        .filter(|s| s.contains(".m3u8"))
+        .ok_or_else(|| anyhow!("megaplay file is not m3u8"))?
+        .to_string();
+    let subtitle = v
+        .get("tracks")
+        .and_then(|t| t.as_array())
+        .and_then(|arr| pick_subtitle(arr, "file"));
+    Ok((file, subtitle))
+}
+
+/// `enc` is base64url (no padding) AES-256-CBC; the player zero-pads the key
+/// to 32 bytes.
+fn decrypt_megaplay_enc(enc: &str) -> Result<String> {
+    let b64: String = enc
+        .chars()
+        .map(|c| match c {
+            '-' => '+',
+            '_' => '/',
+            c => c,
+        })
+        .collect();
+    let raw = b64_decode(&b64)?;
+    let mut key = [0u8; 32];
+    key[..MEGAPLAY_SOURCES_KEY.len()].copy_from_slice(MEGAPLAY_SOURCES_KEY);
+    let plain = cbc::Decryptor::<aes::Aes256>::new((&key).into(), MEGAPLAY_SOURCES_IV.into())
+        .decrypt_padded_vec_mut::<Pkcs7>(&raw)
+        .map_err(|e| anyhow!("megaplay enc decrypt: {e}"))?;
+    String::from_utf8(plain).context("megaplay payload is not utf-8")
+}
+
+/// Default-else-English track pick; `kind: "thumbnails"` tracks are not subtitles.
+fn pick_subtitle(tracks: &[serde_json::Value], url_key: &str) -> Option<String> {
+    let tracks: Vec<&serde_json::Value> = tracks
+        .iter()
+        .filter(|t| t.get("kind").and_then(|k| k.as_str()) != Some("thumbnails"))
+        .collect();
+    tracks
+        .iter()
+        .find(|t| t.get("default").and_then(|d| d.as_bool()) == Some(true))
+        .or_else(|| {
+            tracks.iter().find(|t| {
+                t.get("label")
+                    .and_then(|l| l.as_str())
+                    .is_some_and(|l| l.trim().to_lowercase().starts_with("english"))
+            })
+        })
+        .and_then(|t| t.get(url_key).and_then(|s| s.as_str()))
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
 }
 
 /// Video `src` is required; a malformed subtitle object must not fail the episode.
@@ -332,20 +502,7 @@ fn parse_embed_config(json: &str) -> Result<(String, Option<String>)> {
     let subtitle = v
         .get("subtitles")
         .and_then(|s| s.as_array())
-        .and_then(|arr| {
-            arr.iter()
-                .find(|t| t.get("default").and_then(|d| d.as_bool()) == Some(true))
-                .or_else(|| {
-                    arr.iter().find(|t| {
-                        t.get("label")
-                            .and_then(|l| l.as_str())
-                            .is_some_and(|l| l.trim().to_lowercase().starts_with("english"))
-                    })
-                })
-                .and_then(|t| t.get("src").and_then(|s| s.as_str()))
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_string())
-        });
+        .and_then(|arr| pick_subtitle(arr, "src"));
     Ok((src, subtitle))
 }
 
@@ -486,7 +643,7 @@ mod tests {
     }
 
     #[test]
-    fn zoko_embed_picks_requested_mode() {
+    fn server_embed_picks_named_server_and_mode() {
         let html = r#"
             <div class="server-item" data-type="sub" data-id="4"
                 data-server-name="ZokoAnime"
@@ -498,13 +655,81 @@ mod tests {
                 data-server-name="HD-1"
                 data-hash="aHR0cHM6Ly9tZWdhcGxheS5idXp6L3N1Yg">x</div>"#;
         assert_eq!(
-            parse_zoko_embed(html, "sub").as_deref(),
+            parse_server_embed(html, "sub", "ZokoAnime").as_deref(),
             Some("https://zokoanime.video/sub")
         );
         assert_eq!(
-            parse_zoko_embed(html, "dub").as_deref(),
+            parse_server_embed(html, "dub", "ZokoAnime").as_deref(),
             Some("https://zokoanime.video/dub")
         );
+        assert_eq!(
+            parse_server_embed(html, "sub", "HD-1").as_deref(),
+            Some("https://megaplay.buzz/sub")
+        );
+        assert_eq!(parse_server_embed(html, "dub", "HD-1"), None);
+    }
+
+    #[test]
+    fn megaplay_embed_mirrors_zoko_stream_path() {
+        assert_eq!(
+            megaplay_from_zoko("https://zokoanime.video/stream/mal/61483/12/sub").as_deref(),
+            Some("https://megaplay.buzz/stream/mal/61483/12/sub")
+        );
+        assert_eq!(
+            megaplay_from_zoko("https://zokoanime.video/stream/mal/1/2/dub?x=1").as_deref(),
+            Some("https://megaplay.buzz/stream/mal/1/2/dub")
+        );
+        assert_eq!(
+            megaplay_from_zoko("https://zokoanime.video/embed/abc"),
+            None
+        );
+    }
+
+    #[test]
+    fn megaplay_player_id_reads_data_id_not_realid() {
+        let page = r#"<div class="fix-area" id="megaplay-player"
+            data-id="177625"
+            data-realid="843470"
+            data-mediaid="8817"></div>"#;
+        assert_eq!(megaplay_player_id(page).as_deref(), Some("177625"));
+        let error = r#"<title>Error - MegaPlay</title><div class="error-container">"#;
+        assert_eq!(megaplay_player_id(error), None);
+    }
+
+    #[test]
+    fn megaplay_sources_url_forwards_s_param() {
+        assert_eq!(
+            megaplay_sources_url(
+                "https://megaplay.buzz/stream/s-2/843470/sub?s=tcdn",
+                "177625"
+            ),
+            "https://megaplay.buzz/stream/getSources?id=177625&s=tcdn"
+        );
+        assert_eq!(
+            megaplay_sources_url("https://megaplay.buzz/stream/mal/61483/1/sub", "177625"),
+            "https://megaplay.buzz/stream/getSources?id=177625"
+        );
+    }
+
+    #[test]
+    fn megaplay_sources_decrypts_real_payload() {
+        let json = r#"{"tracks":[
+            {"file":"https://x/thumbs.vtt","label":"thumbs","kind":"thumbnails","default":true},
+            {"file":"https://x/ar.vtt","label":"Arabic","kind":"captions"},
+            {"file":"https://x/en.vtt","label":"English","kind":"captions","default":true}
+        ],"t":1,"server":4,"enc":"wdeBruh3qqn_i5wUNnyaPaopIIVfK48gK5UCwNjNCsij2cN5qWN1GUdf706Pse8g7PlDinaBXehK9kcFoRGF1ESTeUUFF8vEAKXJFtdc2VBykrNfQSNnYy1V1ld-K0O7QPpHHZAELH1_sgtEadbjB4hGaKpbuZvZLPlg3s-WCIc"}"#;
+        let (master, sub) = parse_megaplay_sources(json).unwrap();
+        assert_eq!(
+            master,
+            "https://megap.shiora.top/7607ac8115a91638cdce233158f6ebbd/6e7caff1e1f1dc261004dc0c6fecc6dc/master.m3u8"
+        );
+        assert_eq!(sub.as_deref(), Some("https://x/en.vtt"));
+    }
+
+    #[test]
+    fn megaplay_enc_rejects_garbage() {
+        assert!(decrypt_megaplay_enc("!!!not base64!!!").is_err());
+        assert!(decrypt_megaplay_enc("aGVsbG8gd29ybGQ").is_err());
     }
 
     #[test]

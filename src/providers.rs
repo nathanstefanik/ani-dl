@@ -48,3 +48,36 @@ pub fn select_quality<'a>(streams: &'a [Stream], quality: &str) -> Option<&'a St
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stream(provider: &str, height: u32) -> Stream {
+        Stream {
+            height,
+            url: format!("https://{provider}.example/{height}.m3u8"),
+            referer: String::new(),
+            provider: provider.to_string(),
+            subtitle: None,
+        }
+    }
+
+    #[test]
+    fn select_quality_prefers_height_then_first_provider() {
+        let streams = vec![
+            stream("zokoanime", 360),
+            stream("megaplay", 1080),
+            stream("megaplay", 720),
+            stream("megaplay", 360),
+        ];
+        let pick = |q: &str| {
+            let s = select_quality(&streams, q).unwrap();
+            (s.provider.as_str(), s.height)
+        };
+        assert_eq!(pick("best"), ("megaplay", 1080));
+        assert_eq!(pick("1080"), ("megaplay", 1080));
+        assert_eq!(pick("720"), ("megaplay", 720));
+        assert_eq!(pick("360"), ("zokoanime", 360));
+    }
+}
