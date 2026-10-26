@@ -130,7 +130,7 @@ numbers into `provider_health.json`.
 ani-dl 1.3.1
 commit:         a1b2c3d45
 target:         aarch64-apple-darwin
-ani-cli parity: 5.1.5
+ani-cli parity: 5.1.6
 provider:       https://hianime.at
 ```
 
@@ -152,7 +152,7 @@ query → search scrape → pick show → episode JSON → pick episodes
 ```
 
 Provider: [hianime.at](https://hianime.at), matching ani-cli 5.1 — the scraping
-paths track **ani-cli 5.1.5**. Each episode resolves two servers of the
+paths track **ani-cli 5.1.6**. Each episode resolves two servers of the
 matching `data-type` (sub or `--dubbed`): ZokoAnime (ani-cli's server) and
 MegaPlay ([megaplay.buzz](https://megaplay.buzz), hianime's "HD-1"), reached
 via the same `/stream/mal/...` episode path, falling back to the HD-1 link

@@ -3,7 +3,7 @@ use std::sync::LazyLock;
 use crate::constants::HIANIME_BASE;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-pub const ANI_CLI_PARITY: &str = "5.1.5";
+pub const ANI_CLI_PARITY: &str = "5.1.6";
 
 const GIT_SHA: &str = env!("ANI_DL_GIT_SHA");
 const TARGET: &str = env!("ANI_DL_TARGET");
